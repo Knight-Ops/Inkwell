@@ -1,0 +1,44 @@
+[package]
+name = "inkwell-client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "inkwell-client"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+gloo-net = "0.5"
+gloo-timers = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+log = "0.4"
+base64 = "0.22.1"
+wasm-bindgen-futures = "0.4.58"
+serde-wasm-bindgen = "0.6.5"
+inkwell-core = { path = "../inkwell-core" }
+leptos = { version = "0.6", features = ["csr"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "CanvasRenderingContext2d",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "HtmlVideoElement",
+    "ImageData",
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamConstraints",
+    "Navigator",
+    "Window",
+    "Url",
+    "MediaStreamTrack",
+    "MediaTrackConstraints",
+    "MediaStreamTrackState",
+    "HtmlAudioElement",
+    "HtmlMediaElement",
+] }

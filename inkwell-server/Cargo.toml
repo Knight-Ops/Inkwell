@@ -1,0 +1,23 @@
+[package]
+name = "inkwell-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+inkwell-core = { path = "../inkwell-core" }
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+sqlx = { version = "0.7", features = [
+    "sqlite",
+    "runtime-tokio-native-tls",
+    "macros",
+] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+image = "0.23"
+img_hash = "3.2"
+dotenvy = "0.15"
+tower-http = { version = "0.6.8", features = ["fs"] }
+futures = "0.3.31"
+hex = "0.4.3"

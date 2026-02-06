@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "inkwell-core",
+    "inkwell-server",
+    "inkwell-client",
+]
+resolver = "2"
