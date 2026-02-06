@@ -1,0 +1,26 @@
+services:
+  inkwell:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: inkwell
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./data:/app/data
+      - ./card_images:/app/card_images
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:/app/data/inkwell.db
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: inkwell-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - inkwell
