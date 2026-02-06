@@ -101,7 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Image decoding and hashing is CPU bound.
                     // For massive scale, we'd use spawn_blocking, but for 10 concurrent tasks it's okay.
                     let img = ImageReader::open(&path_buf)?.decode()?;
-                    let hash = hasher.hash_image(&img);
+                    let processed = inkwell_core::preprocess_image(&img);
+                    let hash = hasher.hash_image(&processed);
                     let phash_str = hash
                         .as_bytes()
                         .iter()

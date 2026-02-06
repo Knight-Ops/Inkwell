@@ -43,19 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hashing {}...", image_path);
     let raw_img = ImageReader::open(image_path)?.decode()?;
 
-    // Helper to preprocess image
-    let preprocess = |img: &image::DynamicImage| -> image::DynamicImage {
-        // Resize to a reasonable working size
-        let resized = img.resize(500, 500, image::imageops::FilterType::Lanczos3);
-        // Convert to grayscale (luma8)
-        let mut gray = resized.to_luma8();
-        // Contrast stretch
-        image::imageops::contrast(&mut gray, 20.0);
-        // Blur to reduce noise
-        let blurred = image::imageops::blur(&gray, 1.0);
-        image::DynamicImage::ImageLuma8(blurred)
-    };
-
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::Gradient)
         .hash_size(12, 12)
@@ -63,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate hashes for 0, 90, 180, 270 degrees
     let mut candidate_hashes = Vec::new();
-    let base_processed = preprocess(&raw_img);
+    let base_processed = inkwell_core::preprocess_image(&raw_img);
     candidate_hashes.push(hasher.hash_image(&base_processed));
 
     let rot90 = base_processed.rotate90();

@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+/// Preprocesses an image for hashing:
+/// 1. Resize to 500x500 (Lanczos3)
+/// 2. Grayscale
+/// 3. Contrast stretch
+/// 4. Blur
+pub fn preprocess_image(img: &image::DynamicImage) -> image::DynamicImage {
+    // Resize to a reasonable working size
+    let resized = img.resize(500, 500, image::imageops::FilterType::Lanczos3);
+    // Convert to grayscale (luma8)
+    let mut gray = resized.to_luma8();
+    // Contrast stretch
+    image::imageops::contrast(&mut gray, 20.0);
+    // Blur to reduce noise
+    let blurred = image::imageops::blur(&gray, 1.0);
+    image::DynamicImage::ImageLuma8(blurred)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Card {
     /// Unique ID (e.g., "set1-001-en")
