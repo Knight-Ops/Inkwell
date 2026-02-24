@@ -74,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/api/identify", post(identify_card))
+        .route("/api/stats", get(get_stats))
         .nest_service(
             "/card_images",
             tower_http::services::ServeDir::new("card_images"),
@@ -122,6 +123,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
+                    global_total_scans: 0,
                 };
             }
         };
@@ -134,6 +136,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
+                    global_total_scans: 0,
                 };
             }
         };
@@ -143,6 +146,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             return ScanResult {
                 card: None,
                 confidence: 0.0,
+                global_total_scans: 0,
             };
         }
 
@@ -153,6 +157,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
+                    global_total_scans: 0,
                 };
             }
         };
@@ -166,6 +171,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
+                    global_total_scans: 0,
                 };
             }
         };
@@ -230,6 +236,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 ScanResult {
                     card: Some(card),
                     confidence,
+                    global_total_scans: 0,
                 }
             } else {
                 println!(
@@ -239,6 +246,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 ScanResult {
                     card: None,
                     confidence: 0.0,
+                    global_total_scans: 0,
                 }
             }
         } else {
@@ -246,6 +254,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             ScanResult {
                 card: None,
                 confidence: 0.0,
+                global_total_scans: 0,
             }
         }
     })
@@ -255,8 +264,42 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         ScanResult {
             card: None,
             confidence: 0.0,
+            global_total_scans: 0,
         }
     });
 
-    Json(scan_result)
+    let mut final_result = scan_result;
+
+    // 4. Update and fetch global stats if a match was found
+    if final_result.card.is_some() {
+        let _ = sqlx::query(
+            "UPDATE system_stats SET value = value + 1 WHERE key = 'total_scanned_cards'",
+        )
+        .execute(&state.pool)
+        .await;
+    }
+
+    // Always fetch latest count
+    if let Ok(row) = sqlx::query("SELECT value FROM system_stats WHERE key = 'total_scanned_cards'")
+        .fetch_one(&state.pool)
+        .await
+    {
+        final_result.global_total_scans = row.get::<i64, _>("value") as u64;
+    }
+
+    Json(final_result)
+}
+
+async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let mut total = 0;
+    if let Ok(row) = sqlx::query("SELECT value FROM system_stats WHERE key = 'total_scanned_cards'")
+        .fetch_one(&state.pool)
+        .await
+    {
+        total = row.get::<i64, _>("value") as u64;
+    }
+
+    Json(serde_json::json!({
+        "total_scanned_cards": total
+    }))
 }

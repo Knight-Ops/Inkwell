@@ -129,9 +129,12 @@ pub struct ScanResult {
     /// The closest matching card, if any found
     pub card: Option<Card>,
 
-    /// 0.0 to 1.0 (Derived from Hamming Distance)
     /// Used by UI to decide whether to show "Success" or "Try Again"
     pub confidence: f64,
+
+    /// Total number of cards successfully scanned globally (persistent)
+    #[serde(default)]
+    pub global_total_scans: u64,
 }
 
 #[cfg(test)]

@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = ScanResult {
                 card: Some(card),
                 confidence,
+                global_total_scans: 0,
             };
             println!("JSON: {}", serde_json::to_string(&result)?);
         } else {

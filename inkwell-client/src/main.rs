@@ -43,6 +43,7 @@ pub fn App() -> impl IntoView {
     let (facing_mode, set_facing_mode) = create_signal("environment".to_string());
     let (scanned_cards, set_scanned_cards) = create_signal::<Vec<ScannedItem>>(vec![]);
     let (show_logs, set_show_logs) = create_signal(false);
+    let (global_total, set_global_total) = create_signal(0u64);
 
     let running_total = move || {
         scanned_cards.get().iter().fold(0.0, |acc, item| {
@@ -105,6 +106,17 @@ pub fn App() -> impl IntoView {
 
         // Initialize Ko-fi widget after mount
         initKofi();
+
+        // Fetch initial stats
+        spawn_local(async move {
+            if let Ok(resp) = Request::get("/api/stats").send().await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(total) = json["total_scanned_cards"].as_u64() {
+                        set_global_total.set(total);
+                    }
+                }
+            }
+        });
     });
 
     let (is_torch_on, set_is_torch_on) = create_signal(false);
@@ -365,6 +377,7 @@ pub fn App() -> impl IntoView {
                             };
                             set_scanned_cards.update(|list| list.push(item));
                         }
+                        set_global_total.set(result.global_total_scans);
                         set_scan_result.set(Some(result));
                     }
                     Err(e) => {
@@ -431,6 +444,11 @@ pub fn App() -> impl IntoView {
                 "Session Total: $"
                 {move || format!("{:.2}", running_total())}
                 <span class="text-xs text-slate-500 ml-2">{move || format!("({} cards)", scanned_cards.get().len())}</span>
+            </div>
+
+            <div class="text-sm font-bold text-purple-300 bg-slate-800/50 px-4 py-1 rounded-full border border-slate-700 tracking-wide mb-4">
+                "Global Scans: "
+                <span class="text-white">{move || global_total.get()}</span>
             </div>
 
             <div class="relative rounded-2xl overflow-hidden border-4 border-purple-500 shadow-2xl shadow-purple-500/20 max-w-lg w-full">
