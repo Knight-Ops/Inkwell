@@ -15,7 +15,7 @@ services:
       - .env
     environment:
       - DATABASE_URL=sqlite:/app/data/inkwell.db
-      - CAPTURED_IMAGES_DIR=/app/captured_images
+      # - CAPTURED_IMAGES_DIR=/app/captured_images
 
   tunnel:
     image: cloudflare/cloudflared:latest

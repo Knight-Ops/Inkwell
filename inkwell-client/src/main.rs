@@ -8,6 +8,11 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::MediaStreamConstraints;
 
+#[wasm_bindgen]
+extern "C" {
+    fn initKofi();
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct LorcastPrices {
     pub usd: Option<String>,
@@ -37,6 +42,7 @@ pub fn App() -> impl IntoView {
     let (logs, set_logs) = create_signal::<Vec<String>>(vec![]);
     let (facing_mode, set_facing_mode) = create_signal("environment".to_string());
     let (scanned_cards, set_scanned_cards) = create_signal::<Vec<ScannedItem>>(vec![]);
+    let (show_logs, set_show_logs) = create_signal(false);
 
     let running_total = move || {
         scanned_cards.get().iter().fold(0.0, |acc, item| {
@@ -96,6 +102,9 @@ pub fn App() -> impl IntoView {
             log_err("Secure Context: NO".into());
             log_err("Camera requires HTTPS/localhost".into());
         }
+
+        // Initialize Ko-fi widget after mount
+        initKofi();
     });
 
     let (is_torch_on, set_is_torch_on) = create_signal(false);
@@ -584,12 +593,37 @@ pub fn App() -> impl IntoView {
             </div>
 
             // Debug Logs Overlay
-            <div class="fixed bottom-0 left-0 right-0 h-48 bg-black/80 text-green-400 p-4 font-mono text-xs overflow-y-auto border-t border-slate-700 z-50 pointer-events-none">
-                <div class="font-bold border-b border-green-900 mb-2">"DEBUG LOGS"</div>
-                <ul>
-                    {move || logs.get().into_iter().rev().map(|msg| view! { <li>{msg}</li> }).collect_view()}
-                </ul>
+            <div class=move || format!(
+                "fixed bottom-0 left-0 right-0 bg-black/95 text-green-400 font-mono text-xs transition-all duration-500 z-50 flex flex-col border-t border-slate-700 transform {}",
+                if show_logs.get() { "h-64 translate-y-0" } else { "h-64 translate-y-full" }
+            )>
+                <div
+                    on:click=move |_| set_show_logs.set(false)
+                    class="flex items-center justify-between px-4 min-h-[40px] cursor-pointer border-b border-green-900/30 bg-black/50 hover:bg-black/20 pointer-events-auto"
+                >
+                    <div class="flex items-center gap-2">
+                        <div class=move || format!("w-2 h-2 rounded-full bg-green-500 {}", if is_scanning.get() { "animate-pulse" } else { "" })></div>
+                        <span class="font-bold uppercase tracking-tighter">"System Logs"</span>
+                    </div>
+                    <span class="text-[10px] opacity-50 uppercase tracking-widest">"Hide"</span>
+                </div>
+                <div class="p-4 overflow-y-auto flex-1 pointer-events-auto">
+                    <ul>
+                        {move || logs.get().into_iter().rev().map(|msg| view! { <li>{msg}</li> }).collect_view()}
+                    </ul>
+                </div>
             </div>
+
+            // Small Floating Toggle Button
+            <button
+                on:click=move |_| set_show_logs.set(true)
+                class=move || format!(
+                    "fixed bottom-4 right-4 bg-black/80 text-green-500 px-3 py-1.5 rounded-lg border border-green-900/50 text-[10px] uppercase font-mono z-40 hover:bg-black transition-all duration-300 transform shadow-lg {}",
+                    if show_logs.get() { "translate-y-20 opacity-0 pointer-events-none" } else { "translate-y-0 opacity-100 pointer-events-auto" }
+                )
+            >
+                "Show Logs"
+            </button>
         </div>
     }
 }

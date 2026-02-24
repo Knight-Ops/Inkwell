@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Inkwell Scanner</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src='https://storage.ko-fi.com/cdn/scripts/overlay-widget.js'></script>
+    <script>
+      window.initKofi = function() {
+        kofiWidgetOverlay.draw('knightops', {
+          'type': 'floating-chat',
+          'floating-chat.donateButton.text': 'Support Me',
+          'floating-chat.donateButton.background-color': '#00b9fe',
+          'floating-chat.donateButton.text-color': '#fff'
+        });
+      };
+    </script>
     <link data-trunk rel="rust" data-bin="inkwell-client" />
   </head>
   <body>
