@@ -176,7 +176,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         // Low Match Count threshold (depends on feature count).
         // AKAZE typically extracts 100-1000 features.
         // Let's set a minimum threshold.
-        const MIN_GOOD_MATCHES: usize = 15;
+        const MIN_GOOD_MATCHES: usize = 20;
         let ratio_thresh = 0.75;
 
         for (train_bytes, card) in state.index.iter() {
