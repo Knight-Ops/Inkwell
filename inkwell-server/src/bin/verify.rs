@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut best_card: Option<Card> = None;
     let mut max_good_matches = 0;
-    const MIN_GOOD_MATCHES: usize = 20;
+    const MIN_GOOD_MATCHES: usize = 50;
     let ratio_thresh = 0.75;
 
     for card in cards {

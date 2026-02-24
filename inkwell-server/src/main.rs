@@ -36,6 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&database_url)
         .await?;
 
+    // Run migrations
+    sqlx::migrate!("../migrations").run(&pool).await?;
+
     // 2. Load and Index Cards
     println!("Indexing cards for hot-RAM lookup...");
     let rows = sqlx::query("SELECT id, name, subtitle, phash, image_url, akaze_data, rarity, set_code, card_number FROM cards")
@@ -182,7 +185,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         // Low Match Count threshold (depends on feature count).
         // AKAZE typically extracts 100-1000 features.
         // Let's set a minimum threshold.
-        const MIN_GOOD_MATCHES: usize = 20;
+        const MIN_GOOD_MATCHES: usize = 50;
         let ratio_thresh = 0.75;
 
         for (train_bytes, card) in state.index.iter() {
