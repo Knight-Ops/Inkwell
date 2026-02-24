@@ -430,7 +430,7 @@ pub fn App() -> impl IntoView {
             <div class="text-xl font-bold text-emerald-400 bg-slate-800 px-6 py-2 rounded-full border border-slate-700 shadow-lg mb-2">
                 "Session Total: $"
                 {move || format!("{:.2}", running_total())}
-                <span class="text-xs text-slate-500 ml-2">"({} cards)" {move || scanned_cards.get().len()}</span>
+                <span class="text-xs text-slate-500 ml-2">{move || format!("({} cards)", scanned_cards.get().len())}</span>
             </div>
 
             <div class="relative rounded-2xl overflow-hidden border-4 border-purple-500 shadow-2xl shadow-purple-500/20 max-w-lg w-full">
