@@ -8,6 +8,25 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::MediaStreamConstraints;
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct LorcastPrices {
+    pub usd: Option<String>,
+    pub usd_foil: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct LorcastCard {
+    pub prices: LorcastPrices,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScannedItem {
+    pub card: inkwell_core::Card,
+    pub prices: Option<LorcastPrices>,
+    pub is_foil: bool,
+    pub scanned_at: String,
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let video_ref = create_node_ref::<html::Video>();
@@ -17,6 +36,25 @@ pub fn App() -> impl IntoView {
     let (camera_error, set_camera_error) = create_signal::<Option<String>>(None);
     let (logs, set_logs) = create_signal::<Vec<String>>(vec![]);
     let (facing_mode, set_facing_mode) = create_signal("environment".to_string());
+    let (scanned_cards, set_scanned_cards) = create_signal::<Vec<ScannedItem>>(vec![]);
+
+    let running_total = move || {
+        scanned_cards.get().iter().fold(0.0, |acc, item| {
+            let price_str = item
+                .prices
+                .as_ref()
+                .and_then(|p| {
+                    if item.is_foil {
+                        p.usd_foil.as_deref().or(p.usd.as_deref())
+                    } else {
+                        p.usd.as_deref()
+                    }
+                })
+                .unwrap_or("0");
+            let val: f64 = price_str.parse().unwrap_or(0.0);
+            acc + val
+        })
+    };
 
     // Custom logging helper that goes to console AND screen
     let log_msg = move |msg: String| {
@@ -293,6 +331,31 @@ pub fn App() -> impl IntoView {
                 {
                     Ok(resp) => {
                         let result = resp.json::<ScanResult>().await.unwrap();
+                        if let Some(card) = result.card.clone() {
+                            let lorcast_url = format!(
+                                "https://api.lorcast.com/v0/cards/{}/{}",
+                                card.set_code, card.card_number
+                            );
+                            let prices =
+                                match gloo_net::http::Request::get(&lorcast_url).send().await {
+                                    Ok(res) if res.ok() => {
+                                        res.json::<LorcastCard>().await.ok().map(|lc| lc.prices)
+                                    }
+                                    _ => None,
+                                };
+                            let scanned_at = js_sys::Date::new_0()
+                                .to_iso_string()
+                                .as_string()
+                                .unwrap_or_default();
+
+                            let item = ScannedItem {
+                                card,
+                                prices,
+                                is_foil: false,
+                                scanned_at,
+                            };
+                            set_scanned_cards.update(|list| list.push(item));
+                        }
                         set_scan_result.set(Some(result));
                     }
                     Err(e) => {
@@ -304,11 +367,62 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let download_csv = move |_| {
+        let cards = scanned_cards.get();
+        if cards.is_empty() {
+            log_err("No cards to export!".into());
+            return;
+        }
+
+        let csv_content = generate_csv(&cards);
+
+        // Trigger download
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let body = document.body().unwrap();
+
+        let blob_parts = js_sys::Array::new();
+        blob_parts.push(&JsValue::from_str(&csv_content));
+
+        let blob_props = web_sys::BlobPropertyBag::new();
+        blob_props.set_type("text/csv");
+
+        let blob =
+            web_sys::Blob::new_with_str_sequence_and_options(&blob_parts, &blob_props).unwrap();
+        let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
+
+        let anchor = document
+            .create_element("a")
+            .unwrap()
+            .unchecked_into::<web_sys::HtmlAnchorElement>();
+        anchor.set_href(&url);
+        anchor.set_download("inkwell_matches.csv");
+        anchor.style().set_property("display", "none").unwrap();
+        body.append_child(&anchor).unwrap();
+        anchor.click();
+        body.remove_child(&anchor).unwrap();
+        web_sys::Url::revoke_object_url(&url).unwrap();
+
+        log_msg("CSV Download triggered.".into());
+    };
+
+    let reset_session = move |_| {
+        set_scanned_cards.set(vec![]);
+        set_scan_result.set(None);
+        log_msg("Session reset.".into());
+    };
+
     view! {
         <div class="flex flex-col items-center gap-4 p-4 text-white bg-slate-900 min-h-screen relative">
             <h1 class="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-600 bg-clip-text text-transparent">
                 "Inkwell Scanner"
             </h1>
+
+            <div class="text-xl font-bold text-emerald-400 bg-slate-800 px-6 py-2 rounded-full border border-slate-700 shadow-lg mb-2">
+                "Session Total: $"
+                {move || format!("{:.2}", running_total())}
+                <span class="text-xs text-slate-500 ml-2">"({} cards)" {move || scanned_cards.get().len()}</span>
+            </div>
 
             <div class="relative rounded-2xl overflow-hidden border-4 border-purple-500 shadow-2xl shadow-purple-500/20 max-w-lg w-full">
                 <video
@@ -361,6 +475,16 @@ pub fn App() -> impl IntoView {
                 </button>
 
                 <button
+                    on:click=download_csv
+                    class="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 rounded-full font-bold transition-all transform hover:scale-105 shadow-lg shadow-emerald-500/20 flex items-center gap-2"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    "CSV"
+                </button>
+
+                <button
                     on:click=swap_camera
                     class="p-3 bg-slate-800 hover:bg-slate-700 rounded-full font-bold transition-all transform hover:scale-105 border border-slate-700 shadow-lg"
                     title="Swap Camera"
@@ -382,6 +506,16 @@ pub fn App() -> impl IntoView {
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
                     </svg>
                 </button>
+
+                <button
+                    on:click=reset_session
+                    class="p-3 bg-red-900/50 hover:bg-red-800 text-red-500 hover:text-red-400 rounded-full font-bold transition-all transform hover:scale-105 border border-red-900/50 shadow-lg"
+                    title="Reset Session"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                </button>
             </div>
 
             <div class="max-w-lg w-full mt-4">
@@ -397,6 +531,46 @@ pub fn App() -> impl IntoView {
                                         "Found"
                                     </span>
                                 </div>
+                                {
+                                    let items = scanned_cards.get();
+                                    if let Some(last_item) = items.last().cloned() {
+                                        if last_item.card.phash == card.phash && last_item.card.id == card.id {
+                                            let price_usd = last_item.prices.as_ref().and_then(|p| p.usd.clone()).unwrap_or_else(|| "N/A".to_string());
+                                            let price_foil = last_item.prices.as_ref().and_then(|p| p.usd_foil.clone()).unwrap_or_else(|| "N/A".to_string());
+                                            let is_currently_foil = last_item.is_foil;
+
+                                            let toggle_foil = move |_| {
+                                                set_scanned_cards.update(|list| {
+                                                    if let Some(last_mut) = list.last_mut() {
+                                                        last_mut.is_foil = !last_mut.is_foil;
+                                                    }
+                                                });
+                                            };
+
+                                            view! {
+                                                <div class="mt-4 border-t border-slate-700 pt-4">
+                                                    <div class="flex justify-between items-center text-sm font-mono mb-2">
+                                                        <span class="text-slate-400">"Normal: $" {price_usd}</span>
+                                                        <span class="text-purple-400">"Foil: $" {price_foil}</span>
+                                                    </div>
+                                                    <label class="flex items-center gap-2 cursor-pointer mt-2 text-sm text-slate-300 w-max">
+                                                        <input
+                                                            type="checkbox"
+                                                            class="w-4 h-4 rounded border-slate-600 text-purple-600 focus:ring-purple-600 bg-slate-700"
+                                                            on:change=toggle_foil
+                                                            checked=is_currently_foil
+                                                        />
+                                                        "Mark as Foil"
+                                                    </label>
+                                                </div>
+                                            }.into_view()
+                                        } else {
+                                            ().into_view()
+                                        }
+                                    } else {
+                                        ().into_view()
+                                    }
+                                }
                             </div>
                         }
                     } else {
@@ -423,4 +597,111 @@ pub fn App() -> impl IntoView {
 fn main() {
     console_error_panic_hook::set_once();
     leptos::mount_to_body(App);
+}
+
+pub fn generate_csv(items: &[ScannedItem]) -> String {
+    let mut csv = String::from("Name,Rarity,Set,Number,Price,Foil,ScannedAt\n");
+    for item in items {
+        let card = &item.card;
+        let full_name = if card.subtitle.is_empty() {
+            card.name.clone()
+        } else {
+            format!("{} - {}", card.name, card.subtitle)
+        };
+
+        // Simple CSV escaping: if comma or quote exists, wrap in quotes.
+        // If quotes exist, double them.
+        let escaped_name = if full_name.contains(',') || full_name.contains('"') {
+            format!("\"{}\"", full_name.replace('"', "\"\""))
+        } else {
+            full_name
+        };
+
+        let price_str = item
+            .prices
+            .as_ref()
+            .and_then(|p| {
+                if item.is_foil {
+                    p.usd_foil.as_deref().or(p.usd.as_deref())
+                } else {
+                    p.usd.as_deref()
+                }
+            })
+            .unwrap_or("0");
+
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{}\n",
+            escaped_name,
+            card.rarity,
+            card.set_code,
+            card.card_number,
+            price_str,
+            item.is_foil,
+            item.scanned_at
+        ));
+    }
+    csv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inkwell_core::Card;
+
+    #[test]
+    fn test_csv_generation() {
+        let items = vec![
+            ScannedItem {
+                card: Card {
+                    id: "1".into(),
+                    name: "Mickey Mouse".into(),
+                    subtitle: "Wayward Sorcerer".into(),
+                    phash: "".into(),
+                    akaze_data: vec![],
+                    image_url: "".into(),
+                    rarity: "Common".into(),
+                    set_code: "1".into(),
+                    card_number: 123,
+                },
+                prices: Some(LorcastPrices {
+                    usd: Some("1.50".into()),
+                    usd_foil: Some("5.00".into()),
+                }),
+                is_foil: false,
+                scanned_at: "2026-02-23T21:55:00.000Z".into(),
+            },
+            ScannedItem {
+                card: Card {
+                    id: "2".into(),
+                    name: "Donald Duck, The Brave".into(), // contains comma
+                    subtitle: "".into(),
+                    phash: "".into(),
+                    akaze_data: vec![],
+                    image_url: "".into(),
+                    rarity: "Rare".into(),
+                    set_code: "2".into(),
+                    card_number: 45,
+                },
+                prices: Some(LorcastPrices {
+                    usd: Some("2.00".into()),
+                    usd_foil: None,
+                }), // missing foil price fallback
+                is_foil: true,
+                scanned_at: "2026-02-23T21:56:00.000Z".into(),
+            },
+        ];
+
+        let csv = generate_csv(&items);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Name,Rarity,Set,Number,Price,Foil,ScannedAt");
+        assert_eq!(
+            lines[1],
+            "Mickey Mouse - Wayward Sorcerer,Common,1,123,1.50,false,2026-02-23T21:55:00.000Z"
+        );
+        assert_eq!(
+            lines[2],
+            "\"Donald Duck, The Brave\",Rare,2,45,2.00,true,2026-02-23T21:56:00.000Z"
+        ); // normal price used
+    }
 }

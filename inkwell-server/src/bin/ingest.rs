@@ -17,6 +17,7 @@ struct LorcanaCard {
     #[serde(alias = "setCode")]
     set_code: String,
     number: u32,
+    rarity: Option<String>,
     images: LorcanaImages,
 }
 
@@ -34,24 +35,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:inkwell.db".to_string());
 
-    // Ensure DB file exists for sqlite
+    // Ensure parent directories exist for sqlite
     if !database_url.contains("mode=memory") {
         if let Some(path) = database_url.strip_prefix("sqlite:") {
-            if !Path::new(path).exists() {
-                println!("Database file not found, creating {}", path);
-                fs::File::create(path)?;
+            let path = Path::new(path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)?;
+                }
             }
         }
     }
 
-    let pool = SqlitePoolOptions::new().connect(&database_url).await?;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+
+    let connection_options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+
+    let pool = SqlitePoolOptions::new()
+        .connect_with(connection_options)
+        .await?;
 
     sqlx::migrate!("../migrations").run(&pool).await?;
 
     println!("Database initialized.");
 
     // 2. Setup Directories
-    fs::create_dir_all(IMAGE_DIR)?;
+    let image_dir = std::env::var("CARD_IMAGES_DIR").unwrap_or_else(|_| IMAGE_DIR.to_string());
+    fs::create_dir_all(&image_dir)?;
 
     // 3. Fetch JSON
     println!("Fetching cards from {}", LORCANA_JSON_URL);
@@ -69,11 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wrapper: Wrapper = serde_json::from_str(&json_text)?;
     println!("Found {} cards.", wrapper.cards.len());
 
-    let hasher = Arc::new(
+    let hasher_config = Arc::new(
         HasherConfig::new()
             .hash_alg(HashAlg::Gradient)
-            .hash_size(12, 12)
-            .to_hasher(),
+            .hash_size(12, 12),
     );
 
     let client = Arc::new(client);
@@ -82,26 +92,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .for_each_concurrent(CONCURRENCY_LIMIT, |card_data| {
             let pool = pool.clone();
             let client = client.clone();
-            let hasher = hasher.clone();
+            let hasher_config = hasher_config.clone();
+            let image_dir = image_dir.clone();
             async move {
                 // ID construction: set_code-number
                 let id = format!("{}-{}", card_data.set_code, card_data.number);
-                let image_filename = format!("{}/{}.jpg", IMAGE_DIR, id);
-                let path_buf = std::path::PathBuf::from(&image_filename);
+                let local_path = Path::new(&image_dir).join(format!("{}.jpg", id));
+                let db_image_url = format!("{}/{}.jpg", IMAGE_DIR, id);
 
                 let process_result = async {
                     // 4. Download Image
-                    if !path_buf.exists() {
-                        println!("Downloading image for {}...", id);
-                        let img_bytes = client.get(&card_data.images.full).send().await?.bytes().await?;
-                        fs::write(&path_buf, img_bytes)?;
-                    }
+                        if !local_path.exists() {
+                            println!("Downloading image for {}...", id);
+                            let img_bytes = client.get(&card_data.images.full).send().await?.bytes().await?;
+                            fs::write(&local_path, img_bytes)?;
+                        }
 
-                    // 5. Compute Hash
-                    // Image decoding and hashing is CPU bound.
-                    // For massive scale, we'd use spawn_blocking, but for 10 concurrent tasks it's okay.
-                    let img = ImageReader::open(&path_buf)?.decode()?;
+                        // 5. Compute Hash & Features
+                        // Image decoding and hashing is CPU bound.
+                        let img = ImageReader::open(&local_path)?.decode()?;
+                    // Legacy pHash
                     let processed = inkwell_core::preprocess_image(&img);
+                    let hasher = hasher_config.to_hasher();
                     let hash = hasher.hash_image(&processed);
                     let phash_str = hash
                         .as_bytes()
@@ -109,23 +121,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|b| format!("{:02x}", b))
                         .collect::<String>();
 
+                    // AKAZE Featues
+                    // We discard keypoints for storage, we only need descriptors for matching
+                    let (_, akaze_bytes) = inkwell_core::compute_akaze_features(&img)?;
+
                     // 6. Insert into DB
                     let subtitle = card_data.subtitle.clone().unwrap_or_default();
-                    sqlx::query!(
+                    let rarity = card_data.rarity.clone().unwrap_or_else(|| "Unknown".to_string());
+                    sqlx::query(
                         r#"
-                        INSERT INTO cards (id, name, subtitle, set_code, image_url, phash, meta_json)
-                        VALUES (?, ?, ?, ?, ?, ?, '{}')
+                        INSERT INTO cards (id, name, subtitle, set_code, image_url, phash, meta_json, akaze_data, rarity, card_number)
+                        VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                             phash = excluded.phash,
-                            image_url = excluded.image_url
+                            image_url = excluded.image_url,
+                            akaze_data = excluded.akaze_data,
+                            rarity = excluded.rarity,
+                            set_code = excluded.set_code,
+                            card_number = excluded.card_number
                         "#,
-                        id,
-                        card_data.name,
-                        subtitle,
-                        card_data.set_code,
-                        image_filename,
-                        phash_str
                     )
+                    .bind(&id)
+                    .bind(&card_data.name)
+                    .bind(&subtitle)
+                    .bind(&card_data.set_code)
+                    .bind(&db_image_url)
+                    .bind(&phash_str)
+                    .bind(&akaze_bytes)
+                    .bind(&rarity)
+                    .bind(card_data.number)
                     .execute(&pool)
                     .await?;
 

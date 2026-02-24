@@ -1,7 +1,10 @@
-use hex;
 use image::io::Reader as ImageReader;
-use img_hash::{HashAlg, HasherConfig};
-use inkwell_core::{Card, ScanResult};
+use inkwell_core::{akaze_bytes_to_mat, Card, ScanResult};
+use opencv::{
+    core::{DMatch, Mat, Vector, NORM_HAMMING},
+    features2d::BFMatcher,
+    prelude::*,
+};
 use sqlx::{sqlite::SqlitePoolOptions, Row};
 use std::env;
 
@@ -23,110 +26,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Load Cards
     println!("Loading cards from DB...");
-    let rows = sqlx::query("SELECT id, name, subtitle, phash, image_url FROM cards")
+    // Select akaze_data
+    let rows = sqlx::query("SELECT id, name, subtitle, phash, image_url, akaze_data, rarity, set_code, card_number FROM cards")
         .fetch_all(&pool)
         .await?;
 
     let mut cards = Vec::new();
     for row in rows {
+        let akaze_data: Vec<u8> = row.get("akaze_data");
+        // Only load if akaze_data exists
+        if akaze_data.is_empty() {
+            continue;
+        }
+
         cards.push(Card {
             id: row.get("id"),
             name: row.get("name"),
             subtitle: row.get("subtitle"),
             phash: row.get("phash"),
+            akaze_data,
             image_url: row.get("image_url"),
+            rarity: row.get("rarity"),
+            set_code: row.get("set_code"),
+            card_number: row.get("card_number"),
         });
     }
-    println!("Loaded {} cards.", cards.len());
+    println!("Loaded {} cards with AKAZE data.", cards.len());
 
-    // 3. Hash Input Image with Preprocessing and Rotation
-    println!("Hashing {}...", image_path);
+    // 3. Hash Input Image
+    println!("Computing AKAZE for {}...", image_path);
     let raw_img = ImageReader::open(image_path)?.decode()?;
 
-    let hasher = HasherConfig::new()
-        .hash_alg(HashAlg::Gradient)
-        .hash_size(12, 12)
-        .to_hasher();
+    let (_kp, query_desc_bytes) = inkwell_core::compute_akaze_features(&raw_img)?;
+    if query_desc_bytes.is_empty() {
+        println!("No features found in query image.");
+        return Ok(());
+    }
 
-    // Generate hashes for 0, 90, 180, 270 degrees
-    let mut candidate_hashes = Vec::new();
-    let base_processed = inkwell_core::preprocess_image(&raw_img);
-    candidate_hashes.push(hasher.hash_image(&base_processed));
+    let query_mat = akaze_bytes_to_mat(&query_desc_bytes)?;
 
-    let rot90 = base_processed.rotate90();
-    candidate_hashes.push(hasher.hash_image(&rot90));
+    // 4. Find Best Match
+    let mut matcher = BFMatcher::create(NORM_HAMMING, false)?;
 
-    let rot180 = base_processed.rotate180();
-    candidate_hashes.push(hasher.hash_image(&rot180));
-
-    let rot270 = base_processed.rotate270();
-    candidate_hashes.push(hasher.hash_image(&rot270));
-
-    // 4. Find Best Match across all rotations
     let mut best_card: Option<Card> = None;
-    let mut min_dist = u32::MAX;
-    let mut best_rotation_index = 0;
-
-    // Convert candidate hashes strings to bytes once
-    let candidate_hashes_types: Vec<(String, Vec<u8>)> = candidate_hashes
-        .iter()
-        .map(|h| {
-            let hex_str = h
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>();
-            // We can just use the internal bytes directly from the hasher output if we want, but let's match existing logic
-            // existing logic: hex string -> hex decode -> count ones
-            let bytes = hex::decode(&hex_str).unwrap();
-            (hex_str, bytes)
-        })
-        .collect();
-
-    // Print the primary hash (0 deg) for debug
-    println!("Target Hash (0 deg): {}", candidate_hashes_types[0].0);
+    let mut max_good_matches = 0;
+    const MIN_GOOD_MATCHES: usize = 15;
+    let ratio_thresh = 0.75;
 
     for card in cards {
-        let card_hash_bytes = match hex::decode(&card.phash) {
-            Ok(b) => b,
-            Err(_) => continue, // skip invalid db hashes
+        let train_mat = match akaze_bytes_to_mat(&card.akaze_data) {
+            Ok(m) => m,
+            Err(_) => continue,
         };
 
-        for (rot_idx, (_, target_bytes)) in candidate_hashes_types.iter().enumerate() {
-            let dist: u32 = target_bytes
-                .iter()
-                .zip(card_hash_bytes.iter())
-                .map(|(a, b)| (a ^ b).count_ones())
-                .sum();
+        // Prepare matcher
+        DescriptorMatcherTrait::clear(&mut matcher)?;
 
-            if dist < min_dist {
-                min_dist = dist;
-                best_card = Some(card.clone());
-                best_rotation_index = rot_idx;
+        let mut train_vec = Vector::<Mat>::new();
+        train_vec.push(train_mat);
+        matcher.add(&train_vec)?;
+
+        let mut matches = Vector::<Vector<DMatch>>::new();
+        matcher.knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)?;
+
+        let mut good_matches = 0;
+        for m in matches {
+            if m.len() == 2
+                && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance
+            {
+                good_matches += 1;
             }
+        }
+
+        if good_matches > max_good_matches {
+            max_good_matches = good_matches;
+            best_card = Some(card.clone());
         }
     }
 
     // 5. Report
     if let Some(card) = best_card {
-        // Max distance for 12x12 hash (144 bits) is 144.
-        // Existing logic used 64.0 which implies 8x8 hash.
-        // We are using 12x12 hash, so max dist is 144.
-        let confidence = 1.0 - (min_dist as f64 / 144.0);
+        if max_good_matches >= MIN_GOOD_MATCHES {
+            let confidence = (max_good_matches as f64 / 100.0).min(1.0);
+            println!("Match Found:");
+            println!("  Name: {} ({})", card.name, card.subtitle);
+            println!("  ID: {}", card.id);
+            println!("  Good Matches: {}", max_good_matches);
+            println!("  Confidence: {:.2}", confidence);
 
-        println!("Match Found:");
-        println!("  Name: {} ({})", card.name, card.subtitle);
-        println!("  ID: {}", card.id);
-        println!("  Distance: {}", min_dist);
-        println!("  Rotation: {} deg", best_rotation_index * 90);
-        println!("  Confidence: {:.2}", confidence);
-
-        // Output for automated tools to parse if needed
-        let result = ScanResult {
-            card: Some(card),
-            confidence,
-        };
-        println!("JSON: {}", serde_json::to_string(&result)?);
+            let result = ScanResult {
+                card: Some(card),
+                confidence,
+            };
+            println!("JSON: {}", serde_json::to_string(&result)?);
+        } else {
+            println!(
+                "Best match {} had only {} good matches. Below threshold.",
+                card.name, max_good_matches
+            );
+        }
     } else {
         println!("No match found.");
     }

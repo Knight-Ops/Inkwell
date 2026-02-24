@@ -21,3 +21,4 @@ dotenvy = "0.15"
 tower-http = { version = "0.6.8", features = ["fs"] }
 futures = "0.3.31"
 hex = "0.4.3"
+opencv = "0.98.1"

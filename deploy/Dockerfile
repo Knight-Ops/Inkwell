@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     sqlite3 \
     curl \
+    libopencv-dev \
+    clang \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install WASM target and Trunk
@@ -27,7 +30,7 @@ WORKDIR /app
 RUN cargo build --release -p inkwell-server --bin inkwell-server
 
 # Final stage
-FROM debian:bookworm-slim
+FROM rust:1.93-slim
 
 WORKDIR /app
 
@@ -36,6 +39,8 @@ RUN apt-get update && apt-get install -y \
     openssl \
     ca-certificates \
     sqlite3 \
+    libopencv-dev \
+    libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the server binary

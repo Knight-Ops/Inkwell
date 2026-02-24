@@ -10,3 +10,6 @@ image = { version = "0.23", default-features = false, features = [
     "png",
     "jpeg",
 ] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+opencv = "0.98.1"
