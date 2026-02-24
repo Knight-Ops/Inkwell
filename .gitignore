@@ -2,4 +2,4 @@
 /deploy/data
 /deploy/card_images
 /deploy/captured_images
-.env
+Docker.env
