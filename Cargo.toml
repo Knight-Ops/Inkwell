@@ -1,7 +1,4 @@
 [workspace]
-members = [
-    "inkwell-core",
-    "inkwell-server",
-    "inkwell-client",
-]
+members = ["inkwell-core", "inkwell-server", "inkwell-client"]
+default-members = ["inkwell-server"]
 resolver = "2"

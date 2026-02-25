@@ -107,15 +107,23 @@ pub fn App() -> impl IntoView {
         // Initialize Ko-fi widget after mount
         initKofi();
 
-        // Fetch initial stats
-        spawn_local(async move {
-            if let Ok(resp) = Request::get("/api/stats").send().await {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(total) = json["total_scanned_cards"].as_u64() {
-                        set_global_total.set(total);
+        // Fetch initial stats and poll every 5 seconds
+        let fetch_stats = move || {
+            spawn_local(async move {
+                if let Ok(resp) = Request::get("/api/stats").send().await {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(total) = json["total_scanned_cards"].as_u64() {
+                            set_global_total.set(total);
+                        }
                     }
                 }
-            }
+            });
+        };
+
+        fetch_stats(); // First fetch
+        let interval = gloo_timers::callback::Interval::new(5000, fetch_stats);
+        on_cleanup(move || {
+            drop(interval);
         });
     });
 

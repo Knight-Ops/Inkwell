@@ -2,6 +2,7 @@
 name = "inkwell-server"
 version = "0.1.0"
 edition = "2021"
+default-run = "inkwell-server"
 
 [dependencies]
 inkwell-core = { path = "../inkwell-core" }

@@ -12,7 +12,7 @@ services:
       - ./card_images:/app/card_images
       - ./captured_images:/app/captured_images
     env_file:
-      - .env
+      - Docker.env
     environment:
       - DATABASE_URL=sqlite:/app/data/inkwell.db
       # - CAPTURED_IMAGES_DIR=/app/captured_images
@@ -22,7 +22,9 @@ services:
     container_name: inkwell-tunnel
     restart: unless-stopped
     command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    env_file:
+      - Docker.env
+    # environment:
+    #   - TUNNEL_TOKEN=${TUNNEL_TOKEN}
     depends_on:
       - inkwell

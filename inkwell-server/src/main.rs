@@ -13,39 +13,32 @@ use opencv::{
 };
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::io::Cursor;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+mod ingest;
 
 #[derive(Clone)]
 struct AppState {
     #[allow(dead_code)]
     pool: Pool<Sqlite>,
-    // Store akaze_data bytes alongside the full card data for speed
-    index: Arc<Vec<(Vec<u8>, Card)>>,
+    index: Arc<tokio::sync::RwLock<Arc<GlobalIndex>>>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:inkwell.db".to_string());
+struct GlobalIndex {
+    train_vec: Vector<Mat>,
+    cards: Vec<Card>,
+}
 
-    // 1. Setup DB
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await?;
-
-    // Run migrations
-    sqlx::migrate!("../migrations").run(&pool).await?;
-
-    // 2. Load and Index Cards
+async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
     println!("Indexing cards for hot-RAM lookup...");
     let rows = sqlx::query("SELECT id, name, subtitle, phash, image_url, akaze_data, rarity, set_code, card_number FROM cards")
-        .fetch_all(&pool)
+        .fetch_all(pool)
         .await?;
 
-    let mut index = Vec::new();
+    let mut train_vec = Vector::<Mat>::new();
+    let mut cards = Vec::new();
     for row in rows {
         let akaze_data: Vec<u8> = row.get("akaze_data");
         let phash_str: String = row.get("phash");
@@ -62,16 +55,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             card_number: row.get("card_number"),
         };
 
-        if !akaze_data.is_empty() {
-            index.push((akaze_data, card));
+        if let Ok(m) = inkwell_core::akaze_bytes_to_mat(&akaze_data) {
+            train_vec.push(m);
+            cards.push(card);
         }
     }
-    println!("Indexed {} cards.", index.len());
+    println!("Indexed {} cards.", cards.len());
+    Ok(GlobalIndex { train_vec, cards })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:inkwell.db".to_string());
+
+    // 1. Setup DB
+    // Ensure parent directories exist for sqlite
+    if !database_url.contains("mode=memory") {
+        if let Some(path) = database_url.strip_prefix("sqlite:") {
+            let path = std::path::Path::new(path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+        }
+    }
+
+    let connection_options =
+        sqlx::sqlite::SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(connection_options)
+        .await?;
+
+    // Run migrations
+    sqlx::migrate!("../migrations").run(&pool).await?;
+
+    // 2. Load and Index Cards
+    let index = load_index(&pool).await?;
 
     let state = AppState {
-        pool,
-        index: Arc::new(index),
+        pool: pool.clone(),
+        index: Arc::new(tokio::sync::RwLock::new(Arc::new(index))),
     };
+
+    // Spawn ingestion background task
+    let bg_pool = pool.clone();
+    let bg_index = state.index.clone();
+    tokio::spawn(async move {
+        loop {
+            let image_dir =
+                std::env::var("CARD_IMAGES_DIR").unwrap_or_else(|_| "card_images".to_string());
+            if let Err(e) = ingest::run_ingestion(bg_pool.clone(), image_dir).await {
+                eprintln!("Ingestion job failed: {}", e);
+            } else {
+                match load_index(&bg_pool).await {
+                    Ok(new_index) => {
+                        let mut wl = bg_index.write().await;
+                        *wl = Arc::new(new_index);
+                        println!("Reloaded index in background.");
+                    }
+                    Err(e) => eprintln!("Failed to reload index: {}", e),
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
 
     // 3. Setup Routes
     let app = Router::new()
@@ -96,6 +148,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanResult> {
     println!("Received identification request ({} bytes)", body.len());
+
+    let global_index = {
+        let rl = state.index.read().await;
+        rl.clone()
+    };
 
     let scan_result = tokio::task::spawn_blocking(move || {
         // 0. Save image for debugging if configured (Synchronous I/O)
@@ -179,6 +236,24 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             }
         };
 
+        if let Err(e) = matcher.add(&global_index.train_vec) {
+            println!("Matcher add failed: {}", e);
+            return ScanResult {
+                card: None,
+                confidence: 0.0,
+                global_total_scans: 0,
+            };
+        }
+
+        if let Err(e) = matcher.train() {
+            println!("Matcher train failed: {}", e);
+            return ScanResult {
+                card: None,
+                confidence: 0.0,
+                global_total_scans: 0,
+            };
+        }
+
         let mut best_card: Option<Card> = None;
         let mut max_good_matches = 0;
 
@@ -188,43 +263,36 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         const MIN_GOOD_MATCHES: usize = 50;
         let ratio_thresh = 0.75;
 
-        for (train_bytes, card) in state.index.iter() {
-            let train_mat = match akaze_bytes_to_mat(train_bytes) {
-                Ok(m) => m,
-                Err(_) => continue,
+        let mut matches = Vector::<Vector<DMatch>>::new();
+        if matcher
+            .knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)
+            .is_err()
+        {
+            println!("knn_match failed");
+            return ScanResult {
+                card: None,
+                confidence: 0.0,
+                global_total_scans: 0,
             };
+        }
 
-            // Matcher add/clear
-            if let Err(e) = DescriptorMatcherTrait::clear(&mut matcher) {
-                println!("Matcher clear failed: {}", e);
-                continue;
-            }
-            let mut train_vec = Vector::<Mat>::new();
-            train_vec.push(train_mat);
-            if matcher.add(&train_vec).is_err() {
-                continue;
-            }
+        let mut votes = std::collections::HashMap::new();
 
-            let mut matches = Vector::<Vector<DMatch>>::new();
-            if matcher
-                .knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)
-                .is_err()
+        for m in matches {
+            if m.len() == 2
+                && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance
             {
-                continue;
-            }
+                let best_match = m.get(0).unwrap();
+                let img_idx = best_match.img_idx as usize;
 
-            let mut good_matches = 0;
-            for m in matches {
-                if m.len() == 2
-                    && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance
-                {
-                    good_matches += 1;
-                }
+                *votes.entry(img_idx).or_insert(0) += 1;
             }
+        }
 
-            if good_matches > max_good_matches {
-                max_good_matches = good_matches;
-                best_card = Some(card.clone());
+        for (card_idx, vote_count) in votes {
+            if vote_count > max_good_matches {
+                max_good_matches = vote_count;
+                best_card = Some(global_index.cards[card_idx].clone());
             }
         }
 

@@ -31,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fetch_all(&pool)
         .await?;
 
+    let mut train_vec = Vector::<Mat>::new();
     let mut cards = Vec::new();
+
     for row in rows {
         let akaze_data: Vec<u8> = row.get("akaze_data");
         // Only load if akaze_data exists
@@ -39,22 +41,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        cards.push(Card {
+        let card = Card {
             id: row.get("id"),
             name: row.get("name"),
             subtitle: row.get("subtitle"),
             phash: row.get("phash"),
-            akaze_data,
+            akaze_data: akaze_data.clone(),
             image_url: row.get("image_url"),
             rarity: row.get("rarity"),
             set_code: row.get("set_code"),
             card_number: row.get("card_number"),
-        });
+        };
+        
+        if let Ok(m) = akaze_bytes_to_mat(&akaze_data) {
+            train_vec.push(m);
+            cards.push(card);
+        }
     }
-    println!("Loaded {} cards with AKAZE data.", cards.len());
+    println!("Loaded {} cards.", cards.len());
 
     // 3. Hash Input Image
     println!("Computing AKAZE for {}...", image_path);
+    let start_hash = std::time::Instant::now();
     let raw_img = ImageReader::open(image_path)?.decode()?;
 
     let (_kp, query_desc_bytes) = inkwell_core::compute_akaze_features(&raw_img)?;
@@ -64,47 +72,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let query_mat = akaze_bytes_to_mat(&query_desc_bytes)?;
+    println!("Hash computed in {:?}", start_hash.elapsed());
 
     // 4. Find Best Match
+    let start_match = std::time::Instant::now();
     let mut matcher = BFMatcher::create(NORM_HAMMING, false)?;
 
-    let mut best_card: Option<Card> = None;
-    let mut max_good_matches = 0;
-    const MIN_GOOD_MATCHES: usize = 50;
+    matcher.add(&train_vec)?;
+    matcher.train()?;
+    
+    // KNN MATCH ON BATCHED DATA
+    let mut matches = Vector::<Vector<DMatch>>::new();
+    matcher.knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)?;
+
+    let mut votes = std::collections::HashMap::new();
     let ratio_thresh = 0.75;
-
-    for card in cards {
-        let train_mat = match akaze_bytes_to_mat(&card.akaze_data) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        // Prepare matcher
-        DescriptorMatcherTrait::clear(&mut matcher)?;
-
-        let mut train_vec = Vector::<Mat>::new();
-        train_vec.push(train_mat);
-        matcher.add(&train_vec)?;
-
-        let mut matches = Vector::<Vector<DMatch>>::new();
-        matcher.knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)?;
-
-        let mut good_matches = 0;
-        for m in matches {
-            if m.len() == 2
-                && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance
-            {
-                good_matches += 1;
-            }
-        }
-
-        if good_matches > max_good_matches {
-            max_good_matches = good_matches;
-            best_card = Some(card.clone());
+    
+    // Process matches
+    for m in matches {
+        if m.len() == 2
+            && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance
+        {
+            let best_match = m.get(0).unwrap();
+            let img_idx = best_match.img_idx as usize;
+            
+            *votes.entry(img_idx).or_insert(0) += 1;
         }
     }
 
+    let mut max_good_matches = 0;
+    let mut best_card: Option<Card> = None;
+    
+    for (card_idx, vote_count) in votes {
+        if vote_count > max_good_matches {
+            max_good_matches = vote_count;
+            best_card = Some(cards[card_idx].clone());
+        }
+    }
+    println!("Matched in {:?}", start_match.elapsed());
+
     // 5. Report
+    const MIN_GOOD_MATCHES: usize = 50;
     if let Some(card) = best_card {
         if max_good_matches >= MIN_GOOD_MATCHES {
             let confidence = (max_good_matches as f64 / 100.0).min(1.0);

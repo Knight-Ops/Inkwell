@@ -1,0 +1,31 @@
+when:
+  branch:
+    - main
+  event:
+    - tag
+    - release
+
+steps:
+  test:
+      image: harbor.basilisklabs.com/docker-hub/library/rust:1.93
+      commands:
+        - apt-get update && apt-get install -y libssl-dev pkg-config build-essential curl libopencv-dev clang libclang-dev
+        - rustc --version && cargo --version
+        - cargo fetch
+        - cargo test --locked --all --all-features
+  publish:
+    image: woodpeckerci/plugin-kaniko
+    settings:
+      registry: harbor.basilisklabs.com
+      repo: basilisklabs.com/inkwell
+      auto_tag: true
+      cache: true
+      dockerfile: deploy/Dockerfile
+      context: .
+      build_args:
+        - COMMIT_SHA=${CI_COMMIT_SHA}
+        - COMMIT_AUTHOR_EMAIL=${CI_COMMIT_AUTHOR_EMAIL}
+      username:
+        from_secret: harbor_user
+      password:
+        from_secret: harbor_secret
