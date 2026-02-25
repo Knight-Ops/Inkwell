@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 pub fn compute_akaze_features(
     img: &DynamicImage,
 ) -> Result<(Vec<KeyPoint>, Vec<u8>), opencv::Error> {
-    // 1. Resize to a reasonable working size (optional, but good for performance)
+    // Resize to a reasonable working size (optional, but good for performance)
     let resized = img.resize(500, 500, image::imageops::FilterType::Lanczos3);
     let gray = resized.to_luma8();
 
-    // 2. Convert raw pixels to OpenCV Mat
+    // Convert raw pixels to OpenCV Mat
     let (_width, height) = gray.dimensions();
 
     // Create Mat from slice (copies data)
@@ -27,18 +27,18 @@ pub fn compute_akaze_features(
     // Reshape to correct dimensions: channels=1, rows=height.
     let mat = mat_1d.reshape(1, height as i32)?;
 
-    // 3. Init AKAZE
+    // Init AKAZE
     // Use DESCRIPTOR_MLDB for binary descriptors (Hamming distance) and rotation invariance.
     let mut akaze = AKAZE::create_def()?;
 
-    // 4. Detect and Compute
+    // Detect and Compute
     let mut keypoints = Vector::<KeyPoint>::new();
     let mut descriptors = Mat::default();
     let mask = Mat::default();
 
     akaze.detect_and_compute(&mat, &mask, &mut keypoints, &mut descriptors, false)?;
 
-    // 5. Convert descriptors Mat to Vec<u8> for storage
+    // Convert descriptors Mat to Vec<u8> for storage
     let data_len = descriptors.total() * descriptors.elem_size()?;
     let mut descriptors_bytes = vec![0u8; data_len];
     let data_ptr = descriptors.data_bytes()?;
@@ -76,10 +76,10 @@ pub fn akaze_bytes_to_mat(bytes: &[u8]) -> Result<Mat, opencv::Error> {
 }
 
 /// Preprocesses an image for hashing (Legacy pHash support):
-/// 1. Resize to 500x500 (Lanczos3)
-/// 2. Grayscale
-/// 3. Contrast stretch
-/// 4. Blur
+/// - Resize to 500x500 (Lanczos3)
+/// - Grayscale
+/// - Contrast stretch
+/// - Blur
 pub fn preprocess_image(img: &image::DynamicImage) -> image::DynamicImage {
     // Resize to a reasonable working size
     let resized = img.resize(500, 500, image::imageops::FilterType::Lanczos3);

@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:inkwell.db".to_string());
 
-    // 1. Setup DB
+    // Setup DB
     // Ensure parent directories exist for sqlite
     if !database_url.contains("mode=memory") {
         if let Some(path) = database_url.strip_prefix("sqlite:") {
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run migrations
     sqlx::migrate!("../migrations").run(&pool).await?;
 
-    // 2. Load and Index Cards
+    // Load and Index Cards
     let index = load_index(&pool).await?;
 
     let state = AppState {
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 3. Setup Routes
+    // Setup Routes
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/api/identify", post(identify_card))
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fallback_service(tower_http::services::ServeDir::new("dist"))
         .with_state(state);
 
-    // 4. Start Server
+    // Start Server
     let addr = "0.0.0.0:4000";
     println!("Listening on http://{}", addr);
     let listener = TcpListener::bind(addr).await?;
@@ -155,7 +155,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
     };
 
     let scan_result = tokio::task::spawn_blocking(move || {
-        // 0. Save image for debugging if configured (Synchronous I/O)
+        // Save image for debugging if configured (Synchronous I/O)
         if let Ok(dir) = std::env::var("CAPTURED_IMAGES_DIR") {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -170,7 +170,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             }
         }
 
-        // 1. Decode Image
+        // Decode Image
         let img_result = ImageReader::new(Cursor::new(&body))
             .with_guessed_format()
             .expect("Format guess failed") // TODO: Handle error better
@@ -188,7 +188,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             }
         };
 
-        // 2. Compute AKAZE
+        // Compute AKAZE
         let (_kp, query_desc_bytes) = match inkwell_core::compute_akaze_features(&raw_img) {
             Ok(res) => res,
             Err(e) => {
@@ -222,7 +222,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             }
         };
 
-        // 3. Match against index
+        // Match against index
         // Use BFMatcher with NORM_HAMMING
         let mut matcher = match BFMatcher::create(NORM_HAMMING, false) {
             Ok(m) => m,
@@ -341,7 +341,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
 
     let mut final_result = scan_result;
 
-    // 4. Update and fetch global stats if a match was found
+    // Update and fetch global stats if a match was found
     if final_result.card.is_some() {
         let _ = sqlx::query(
             "UPDATE system_stats SET value = value + 1 WHERE key = 'total_scanned_cards'",

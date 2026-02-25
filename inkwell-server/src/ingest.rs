@@ -83,7 +83,7 @@ pub async fn run_ingestion(
 
                         let img = ImageReader::open(&local_path)?.decode()?;
                         let processed = inkwell_core::preprocess_image(&img);
-                        
+
                         let phash_str = {
                             let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).hash_size(12, 12).to_hasher();
                             let hash = hasher.hash_image(&processed);

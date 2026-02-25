@@ -188,7 +188,7 @@ pub fn App() -> impl IntoView {
                 let window = web_sys::window().expect("no global `window` exists");
                 let navigator = window.navigator();
 
-                // 1. Cleanup old stream
+                // Cleanup old stream
                 if let Some(old_stream) = video.src_object() {
                     let stream = old_stream.unchecked_into::<web_sys::MediaStream>();
                     log_msg("Stopping old camera tracks...".into());
@@ -308,7 +308,7 @@ pub fn App() -> impl IntoView {
     let start_scan = move |_| {
         set_is_scanning.set(true);
         if let Some(canvas) = canvas_ref.get() {
-            // 1. Calculate Crop (Reference area in center)
+            // Calculate Crop (Reference area in center)
             let width = canvas.width() as f64;
             let height = canvas.height() as f64;
 
