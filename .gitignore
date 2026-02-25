@@ -3,3 +3,4 @@
 /deploy/card_images
 /deploy/captured_images
 Docker.env
+card_images/
