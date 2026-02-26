@@ -1,26 +1,25 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Inkwell Scanner</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src='https://storage.ko-fi.com/cdn/scripts/overlay-widget.js'></script>
-    <script>
-      window.initKofi = function() {
-        kofiWidgetOverlay.draw('knightops', {
-          'type': 'floating-chat',
-          'floating-chat.donateButton.text': 'Support Me',
-          'floating-chat.donateButton.background-color': '#00b9fe',
-          'floating-chat.donateButton.text-color': '#fff'
-        });
-      };
-    </script>
-    <link data-trunk rel="rust" data-bin="inkwell-client" />
-  </head>
-  <body>
-    <div id="loading_msg" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-family:sans-serif;color:white;background:black;padding:20px;">
-      Loading Inkwell/WASM... (If this stays, WASM failed to load)
-    </div>
-  </body>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inkwell Scanner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link data-trunk rel="rust" data-bin="inkwell-client" />
+</head>
+
+<body>
+  <div id="loading_msg"
+    style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-family:sans-serif;color:white;background:black;padding:20px;">
+    Loading Inkwell/WASM... (If this stays, WASM failed to load)
+  </div>
+  <div
+    class="fixed bottom-0 left-0 w-full bg-slate-900 border-t border-slate-700 py-2 flex justify-center items-center z-[35]">
+    <script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script>
+    <script
+      type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'Y8Y21UU3YH'); kofiwidget2.draw();</script>
+  </div>
+</body>
+
 </html>
