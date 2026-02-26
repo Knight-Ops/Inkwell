@@ -8,11 +8,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::MediaStreamConstraints;
 
-#[wasm_bindgen]
-extern "C" {
-    fn initKofi();
-}
-
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct LorcastPrices {
     pub usd: Option<String>,
@@ -22,6 +17,12 @@ pub struct LorcastPrices {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct LorcastCard {
     pub prices: LorcastPrices,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CsvFormat {
+    Standard,
+    Dreamborn,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +45,8 @@ pub fn App() -> impl IntoView {
     let (scanned_cards, set_scanned_cards) = create_signal::<Vec<ScannedItem>>(vec![]);
     let (show_logs, set_show_logs) = create_signal(false);
     let (global_total, set_global_total) = create_signal(0u64);
+    let (csv_format, set_csv_format) = create_signal(CsvFormat::Standard);
+    let (scan_status, set_scan_status) = create_signal::<Option<bool>>(None);
 
     let running_total = move || {
         scanned_cards.get().iter().fold(0.0, |acc, item| {
@@ -103,9 +106,6 @@ pub fn App() -> impl IntoView {
             log_err("Secure Context: NO".into());
             log_err("Camera requires HTTPS/localhost".into());
         }
-
-        // Initialize Ko-fi widget after mount
-        initKofi();
 
         // Fetch initial stats and poll every 5 seconds
         let fetch_stats = move || {
@@ -361,6 +361,7 @@ pub fn App() -> impl IntoView {
                     Ok(resp) => {
                         let result = resp.json::<ScanResult>().await.unwrap();
                         if let Some(card) = result.card.clone() {
+                            set_scan_status.set(Some(true));
                             let lorcast_url = format!(
                                 "https://api.lorcast.com/v0/cards/{}/{}",
                                 card.set_code, card.card_number
@@ -384,7 +385,13 @@ pub fn App() -> impl IntoView {
                                 scanned_at,
                             };
                             set_scanned_cards.update(|list| list.push(item));
+                        } else {
+                            set_scan_status.set(Some(false));
                         }
+                        set_timeout(
+                            move || set_scan_status.set(None),
+                            std::time::Duration::from_millis(1500),
+                        );
                         set_global_total.set(result.global_total_scans);
                         set_scan_result.set(Some(result));
                     }
@@ -404,7 +411,7 @@ pub fn App() -> impl IntoView {
             return;
         }
 
-        let csv_content = generate_csv(&cards);
+        let csv_content = generate_csv(&cards, csv_format.get());
 
         // Trigger download
         let window = web_sys::window().unwrap();
@@ -443,23 +450,30 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <div class="flex flex-col items-center gap-4 p-4 text-white bg-slate-900 min-h-screen relative">
-            <h1 class="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-600 bg-clip-text text-transparent">
+        <div class="flex flex-col items-center gap-3 sm:gap-4 p-2 sm:p-4 text-white bg-slate-900 min-h-screen relative pb-16">
+            <h1 class="text-2xl sm:text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-600 bg-clip-text text-transparent pt-2">
                 "Inkwell Scanner"
             </h1>
 
-            <div class="text-xl font-bold text-emerald-400 bg-slate-800 px-6 py-2 rounded-full border border-slate-700 shadow-lg mb-2">
+            <div class="text-lg sm:text-xl font-bold text-emerald-400 bg-slate-800 px-4 sm:px-6 py-2 rounded-full border border-slate-700 shadow-lg mb-1 sm:mb-2 text-center">
                 "Session Total: $"
                 {move || format!("{:.2}", running_total())}
                 <span class="text-xs text-slate-500 ml-2">{move || format!("({} cards)", scanned_cards.get().len())}</span>
             </div>
 
-            <div class="text-sm font-bold text-purple-300 bg-slate-800/50 px-4 py-1 rounded-full border border-slate-700 tracking-wide mb-4">
+            <div class="text-xs sm:text-sm font-bold text-purple-300 bg-slate-800/50 px-4 py-1 rounded-full border border-slate-700 tracking-wide mb-2 sm:mb-4 text-center">
                 "Global Scans: "
                 <span class="text-white">{move || global_total.get()}</span>
             </div>
 
-            <div class="relative rounded-2xl overflow-hidden border-4 border-purple-500 shadow-2xl shadow-purple-500/20 max-w-lg w-full">
+            <div class=move || format!(
+                "relative rounded-2xl overflow-hidden border-4 shadow-2xl max-w-lg w-full transition-colors duration-500 {}",
+                match scan_status.get() {
+                    Some(true) => "border-green-500 shadow-green-500/50",
+                    Some(false) => "border-red-500 shadow-red-500/50",
+                    None => "border-purple-500 shadow-purple-500/20",
+                }
+            )>
                 <video
                     node_ref=video_ref
                     autoplay
@@ -501,56 +515,70 @@ pub fn App() -> impl IntoView {
                 })}
             </div>
 
-            <div class="flex gap-4">
+            <div class="flex flex-col sm:flex-row w-full max-w-lg gap-3 mt-2 px-2 sm:px-0">
                 <button
                     on:click=start_scan
-                    class="px-8 py-3 bg-purple-600 hover:bg-purple-700 rounded-full font-bold transition-all transform hover:scale-105 shadow-lg shadow-purple-500/20"
+                    class="w-full sm:w-auto sm:flex-1 px-8 py-4 sm:py-3 bg-purple-600 hover:bg-purple-700 rounded-2xl sm:rounded-full font-bold transition-all transform hover:scale-105 shadow-lg shadow-purple-500/20 text-xl sm:text-base tracking-wide"
                 >
                     {move || if is_scanning.get() { "SCANNING..." } else { "SCAN CARD" }}
                 </button>
 
-                <button
-                    on:click=download_csv
-                    class="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 rounded-full font-bold transition-all transform hover:scale-105 shadow-lg shadow-emerald-500/20 flex items-center gap-2"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    "CSV"
-                </button>
+                <div class="flex flex-wrap sm:flex-nowrap w-full sm:w-auto gap-2 sm:gap-4 justify-between">
+                    <div class="w-full sm:w-auto flex flex-row items-stretch overflow-hidden rounded-2xl sm:rounded-full shadow-lg shadow-emerald-500/20 transform transition-all hover:scale-105 relative z-40">
+                        <select
+                            on:change=move |ev| {
+                                let val = event_target_value(&ev);
+                                set_csv_format.set(if val == "dreamborn" { CsvFormat::Dreamborn } else { CsvFormat::Standard });
+                            }
+                            class="flex-1 sm:flex-none py-3 sm:py-2 px-3 sm:px-2 bg-emerald-700 text-white border-r border-emerald-600 outline-none text-xs font-bold text-center cursor-pointer appearance-none min-w-[80px]"
+                        >
+                            <option value="standard">"Standard CSV"</option>
+                            <option value="dreamborn">"Dreamborn CSV"</option>
+                        </select>
+                        <button
+                            on:click=download_csv
+                            class="flex-none px-6 sm:px-4 flex flex-row justify-center items-center gap-2 py-3 sm:py-2 bg-emerald-600 hover:bg-emerald-500 font-bold transition-all"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                            <span class="text-[10px] sm:text-base uppercase whitespace-nowrap">"CSV"</span>
+                        </button>
+                    </div>
 
-                <button
-                    on:click=swap_camera
-                    class="p-3 bg-slate-800 hover:bg-slate-700 rounded-full font-bold transition-all transform hover:scale-105 border border-slate-700 shadow-lg"
-                    title="Swap Camera"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                </button>
+                    <button
+                        on:click=swap_camera
+                        class="flex-1 sm:flex-none flex justify-center items-center py-2 sm:p-3 bg-slate-800 hover:bg-slate-700 rounded-2xl sm:rounded-full font-bold transition-all transform hover:scale-105 border border-slate-700 shadow-lg"
+                        title="Swap Camera"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                    </button>
 
-                <button
-                    on:click=toggle_torch
-                    class=move || format!(
-                        "p-3 rounded-full font-bold transition-all transform hover:scale-105 border shadow-lg {}",
-                        if is_torch_on.get() { "bg-yellow-500 border-yellow-400 text-black" } else { "bg-slate-800 border-slate-700 text-white" }
-                    )
-                    title="Toggle Flash"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                </button>
+                    <button
+                        on:click=toggle_torch
+                        class=move || format!(
+                            "flex-1 sm:flex-none flex justify-center items-center py-2 sm:p-3 rounded-2xl sm:rounded-full font-bold transition-all transform hover:scale-105 border shadow-lg {}",
+                            if is_torch_on.get() { "bg-yellow-500 border-yellow-400 text-black" } else { "bg-slate-800 border-slate-700 text-white" }
+                        )
+                        title="Toggle Flash"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                    </button>
 
-                <button
-                    on:click=reset_session
-                    class="p-3 bg-red-900/50 hover:bg-red-800 text-red-500 hover:text-red-400 rounded-full font-bold transition-all transform hover:scale-105 border border-red-900/50 shadow-lg"
-                    title="Reset Session"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                </button>
+                    <button
+                        on:click=reset_session
+                        class="flex-1 sm:flex-none flex justify-center items-center py-2 sm:p-3 bg-red-900/50 hover:bg-red-800 text-red-500 hover:text-red-400 rounded-2xl sm:rounded-full font-bold transition-all transform hover:scale-105 border border-red-900/50 shadow-lg"
+                        title="Reset Session"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                    </button>
+                </div>
             </div>
 
             <div class="max-w-lg w-full mt-4">
@@ -644,7 +672,7 @@ pub fn App() -> impl IntoView {
             <button
                 on:click=move |_| set_show_logs.set(true)
                 class=move || format!(
-                    "fixed bottom-4 right-4 bg-black/80 text-green-500 px-3 py-1.5 rounded-lg border border-green-900/50 text-[10px] uppercase font-mono z-40 hover:bg-black transition-all duration-300 transform shadow-lg {}",
+                    "fixed bottom-16 right-4 bg-black/80 text-green-500 px-3 py-1.5 rounded-lg border border-green-900/50 text-[10px] uppercase font-mono z-40 hover:bg-black transition-all duration-300 transform shadow-lg {}",
                     if show_logs.get() { "translate-y-20 opacity-0 pointer-events-none" } else { "translate-y-0 opacity-100 pointer-events-auto" }
                 )
             >
@@ -659,48 +687,92 @@ fn main() {
     leptos::mount_to_body(App);
 }
 
-pub fn generate_csv(items: &[ScannedItem]) -> String {
-    let mut csv = String::from("Name,Rarity,Set,Number,Price,Foil,ScannedAt\n");
-    for item in items {
-        let card = &item.card;
-        let full_name = if card.subtitle.is_empty() {
-            card.name.clone()
-        } else {
-            format!("{} - {}", card.name, card.subtitle)
-        };
+pub fn generate_csv(items: &[ScannedItem], format: CsvFormat) -> String {
+    match format {
+        CsvFormat::Dreamborn => {
+            let mut csv = String::from("Set Number,Card Number,Variant,Count\n");
 
-        // Simple CSV escaping: if comma or quote exists, wrap in quotes.
-        // If quotes exist, double them.
-        let escaped_name = if full_name.contains(',') || full_name.contains('"') {
-            format!("\"{}\"", full_name.replace('"', "\"\""))
-        } else {
-            full_name
-        };
+            let mut rows: Vec<((String, u32, bool), usize)> = Vec::new();
 
-        let price_str = item
-            .prices
-            .as_ref()
-            .and_then(|p| {
-                if item.is_foil {
-                    p.usd_foil.as_deref().or(p.usd.as_deref())
+            for item in items {
+                let card = &item.card;
+                let key = (card.set_code.clone(), card.card_number, item.is_foil);
+
+                if let Some(pos) = rows.iter().position(|row| row.0 == key) {
+                    rows[pos].1 += 1;
                 } else {
-                    p.usd.as_deref()
+                    rows.push((key, 1));
                 }
-            })
-            .unwrap_or("0");
+            }
 
-        csv.push_str(&format!(
-            "{},{},{},{},{},{},{}\n",
-            escaped_name,
-            card.rarity,
-            card.set_code,
-            card.card_number,
-            price_str,
-            item.is_foil,
-            item.scanned_at
-        ));
+            for (key, count) in rows {
+                let variant = if key.2 { "foil" } else { "normal" };
+                csv.push_str(&format!("0{},{},{},{}\n", key.0, key.1, variant, count));
+            }
+
+            csv
+        }
+        CsvFormat::Standard => {
+            let mut csv = String::from(
+                "Set Number,Card Number,Variant,Count,Card Name,Rarity,Price,ScannedAt\n",
+            );
+
+            let mut rows: Vec<((String, u32, bool), usize, String, String, String, String)> =
+                Vec::new();
+
+            for item in items {
+                let card = &item.card;
+                let full_name = if card.subtitle.is_empty() {
+                    card.name.clone()
+                } else {
+                    format!("{} - {}", card.name, card.subtitle)
+                };
+
+                let escaped_name = if full_name.contains(',') || full_name.contains('"') {
+                    format!("\"{}\"", full_name.replace('"', "\"\""))
+                } else {
+                    full_name
+                };
+
+                let price_str = item
+                    .prices
+                    .as_ref()
+                    .and_then(|p| {
+                        if item.is_foil {
+                            p.usd_foil.as_deref().or(p.usd.as_deref())
+                        } else {
+                            p.usd.as_deref()
+                        }
+                    })
+                    .unwrap_or("0");
+
+                let key = (card.set_code.clone(), card.card_number, item.is_foil);
+
+                if let Some(pos) = rows.iter().position(|row| row.0 == key) {
+                    rows[pos].1 += 1;
+                } else {
+                    rows.push((
+                        key,
+                        1,
+                        escaped_name,
+                        card.rarity.clone(),
+                        price_str.to_string(),
+                        item.scanned_at.clone(),
+                    ));
+                }
+            }
+
+            for (key, count, name, rarity, price, scanned_at) in rows {
+                let variant = if key.2 { "foil" } else { "normal" };
+                csv.push_str(&format!(
+                    "{},{},{},{},{},{},{},{}\n",
+                    key.0, key.1, variant, count, name, rarity, price, scanned_at
+                ));
+            }
+
+            csv
+        }
     }
-    csv
 }
 
 #[cfg(test)]
@@ -732,6 +804,22 @@ mod tests {
             },
             ScannedItem {
                 card: Card {
+                    id: "1".into(), // Duplicate item
+                    name: "Mickey Mouse".into(),
+                    subtitle: "Wayward Sorcerer".into(),
+                    phash: "".into(),
+                    akaze_data: vec![],
+                    image_url: "".into(),
+                    rarity: "Common".into(),
+                    set_code: "1".into(),
+                    card_number: 123,
+                },
+                prices: None,
+                is_foil: false,
+                scanned_at: "2026-02-23T21:56:00.000Z".into(),
+            },
+            ScannedItem {
+                card: Card {
                     id: "2".into(),
                     name: "Donald Duck, The Brave".into(), // contains comma
                     subtitle: "".into(),
@@ -751,17 +839,27 @@ mod tests {
             },
         ];
 
-        let csv = generate_csv(&items);
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "Name,Rarity,Set,Number,Price,Foil,ScannedAt");
+        let csv_standard = generate_csv(&items, CsvFormat::Standard);
+        let lines_std: Vec<&str> = csv_standard.lines().collect();
+        assert_eq!(lines_std.len(), 3);
         assert_eq!(
-            lines[1],
-            "Mickey Mouse - Wayward Sorcerer,Common,1,123,1.50,false,2026-02-23T21:55:00.000Z"
+            lines_std[0],
+            "Set Number,Card Number,Variant,Count,Card Name,Rarity,Price,ScannedAt"
         );
         assert_eq!(
-            lines[2],
-            "\"Donald Duck, The Brave\",Rare,2,45,2.00,true,2026-02-23T21:56:00.000Z"
-        ); // normal price used
+            lines_std[1],
+            "1,123,normal,2,Mickey Mouse - Wayward Sorcerer,Common,1.50,2026-02-23T21:55:00.000Z"
+        );
+        assert_eq!(
+            lines_std[2],
+            "2,45,foil,1,\"Donald Duck, The Brave\",Rare,2.00,2026-02-23T21:56:00.000Z"
+        );
+
+        let csv_dream = generate_csv(&items, CsvFormat::Dreamborn);
+        let lines_dream: Vec<&str> = csv_dream.lines().collect();
+        assert_eq!(lines_dream.len(), 3);
+        assert_eq!(lines_dream[0], "Set Number,Card Number,Variant,Count");
+        assert_eq!(lines_dream[1], "01,123,normal,2");
+        assert_eq!(lines_dream[2], "02,45,foil,1");
     }
 }
