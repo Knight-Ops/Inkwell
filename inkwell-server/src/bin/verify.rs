@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load Cards
     println!("Loading cards from DB...");
     // Select akaze_data
-    let rows = sqlx::query("SELECT id, name, subtitle, phash, image_url, akaze_data, rarity, set_code, card_number FROM cards")
+    let rows = sqlx::query("SELECT id, name, subtitle, phash, image_url, akaze_data, rarity, promo_grouping, set_code, card_number FROM cards")
         .fetch_all(&pool)
         .await?;
 
@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             akaze_data: akaze_data.clone(),
             image_url: row.get("image_url"),
             rarity: row.get("rarity"),
+            promo_grouping: row.get("promo_grouping"),
             set_code: row.get("set_code"),
             card_number: row.get("card_number"),
         };
