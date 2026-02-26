@@ -11,6 +11,7 @@ const CONCURRENCY_LIMIT: usize = 10;
 
 #[derive(serde::Deserialize, Debug)]
 struct LorcanaCard {
+    id: u32,
     name: String,
     #[serde(alias = "version")]
     subtitle: Option<String>,
@@ -18,6 +19,8 @@ struct LorcanaCard {
     set_code: String,
     number: u32,
     rarity: Option<String>,
+    #[serde(alias = "promoGrouping")]
+    promo_grouping: Option<String>,
     images: LorcanaImages,
 }
 
@@ -56,7 +59,7 @@ pub async fn run_ingestion(
             let client = client.clone();
             let image_dir = image_dir.clone();
             async move {
-                let id = format!("{}-{}", card_data.set_code, card_data.number);
+                let id = format!("{}-{}-{}", card_data.set_code, card_data.number, card_data.id);
                 let local_path = Path::new(&image_dir).join(format!("{}.jpg", id));
                 let db_image_url = format!("{}/{}.jpg", IMAGE_DIR, id);
 
@@ -97,8 +100,8 @@ pub async fn run_ingestion(
 
                         sqlx::query(
                             r#"
-                            INSERT INTO cards (id, name, subtitle, set_code, image_url, phash, meta_json, akaze_data, rarity, card_number)
-                            VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
+                            INSERT INTO cards (id, name, subtitle, set_code, image_url, phash, meta_json, akaze_data, rarity, promo_grouping, card_number)
+                            VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)
                             ON CONFLICT(id) DO UPDATE SET
                                 name = excluded.name,
                                 subtitle = excluded.subtitle,
@@ -106,6 +109,7 @@ pub async fn run_ingestion(
                                 image_url = excluded.image_url,
                                 akaze_data = excluded.akaze_data,
                                 rarity = excluded.rarity,
+                                promo_grouping = excluded.promo_grouping,
                                 set_code = excluded.set_code,
                                 card_number = excluded.card_number
                             "#,
@@ -118,6 +122,7 @@ pub async fn run_ingestion(
                         .bind(&phash_str)
                         .bind(&akaze_bytes)
                         .bind(&rarity)
+                        .bind(&card_data.promo_grouping)
                         .bind(card_data.number)
                         .execute(&pool)
                         .await?;
@@ -130,6 +135,7 @@ pub async fn run_ingestion(
                                 name = ?,
                                 subtitle = ?,
                                 rarity = ?,
+                                promo_grouping = ?,
                                 set_code = ?,
                                 card_number = ?
                             WHERE id = ?
@@ -138,6 +144,7 @@ pub async fn run_ingestion(
                         .bind(&card_data.name)
                         .bind(&subtitle)
                         .bind(&rarity)
+                        .bind(&card_data.promo_grouping)
                         .bind(&card_data.set_code)
                         .bind(card_data.number)
                         .bind(&id)

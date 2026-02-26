@@ -117,6 +117,9 @@ pub struct Card {
     /// Rarity of the card (e.g., "Common", "Rare")
     pub rarity: String,
 
+    /// Promo grouping string, such as "P3".
+    pub promo_grouping: Option<String>,
+
     /// Set the card belongs to (e.g., "1")
     pub set_code: String,
 
@@ -151,6 +154,7 @@ mod tests {
             akaze_data: vec![],
             image_url: "images/1.jpg".to_string(),
             rarity: "Legendary".to_string(),
+            promo_grouping: None,
             set_code: "1".to_string(),
             card_number: 1,
         };

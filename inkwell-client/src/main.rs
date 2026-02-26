@@ -696,7 +696,13 @@ pub fn generate_csv(items: &[ScannedItem], format: CsvFormat) -> String {
 
             for item in items {
                 let card = &item.card;
-                let key = (card.set_code.clone(), card.card_number, item.is_foil);
+
+                let group_key = card
+                    .promo_grouping
+                    .clone()
+                    .unwrap_or_else(|| format!("0{}", card.set_code));
+
+                let key = (group_key.clone(), card.card_number, item.is_foil);
 
                 if let Some(pos) = rows.iter().position(|row| row.0 == key) {
                     rows[pos].1 += 1;
@@ -707,7 +713,7 @@ pub fn generate_csv(items: &[ScannedItem], format: CsvFormat) -> String {
 
             for (key, count) in rows {
                 let variant = if key.2 { "foil" } else { "normal" };
-                csv.push_str(&format!("0{},{},{},{}\n", key.0, key.1, variant, count));
+                csv.push_str(&format!("{},{},{},{}\n", key.0, key.1, variant, count));
             }
 
             csv
@@ -746,7 +752,12 @@ pub fn generate_csv(items: &[ScannedItem], format: CsvFormat) -> String {
                     })
                     .unwrap_or("0");
 
-                let key = (card.set_code.clone(), card.card_number, item.is_foil);
+                let group_key = card
+                    .promo_grouping
+                    .clone()
+                    .unwrap_or_else(|| card.set_code.clone());
+
+                let key = (group_key.clone(), card.card_number, item.is_foil);
 
                 if let Some(pos) = rows.iter().position(|row| row.0 == key) {
                     rows[pos].1 += 1;
@@ -792,6 +803,7 @@ mod tests {
                     akaze_data: vec![],
                     image_url: "".into(),
                     rarity: "Common".into(),
+                    promo_grouping: None,
                     set_code: "1".into(),
                     card_number: 123,
                 },
@@ -811,6 +823,7 @@ mod tests {
                     akaze_data: vec![],
                     image_url: "".into(),
                     rarity: "Common".into(),
+                    promo_grouping: None,
                     set_code: "1".into(),
                     card_number: 123,
                 },
@@ -827,7 +840,8 @@ mod tests {
                     akaze_data: vec![],
                     image_url: "".into(),
                     rarity: "Rare".into(),
-                    set_code: "2".into(),
+                    promo_grouping: Some("P3".into()),
+                    set_code: "6".into(),
                     card_number: 45,
                 },
                 prices: Some(LorcastPrices {
@@ -852,7 +866,7 @@ mod tests {
         );
         assert_eq!(
             lines_std[2],
-            "2,45,foil,1,\"Donald Duck, The Brave\",Rare,2.00,2026-02-23T21:56:00.000Z"
+            "P3,45,foil,1,\"Donald Duck, The Brave\",Rare,2.00,2026-02-23T21:56:00.000Z"
         );
 
         let csv_dream = generate_csv(&items, CsvFormat::Dreamborn);
@@ -860,6 +874,6 @@ mod tests {
         assert_eq!(lines_dream.len(), 3);
         assert_eq!(lines_dream[0], "Set Number,Card Number,Variant,Count");
         assert_eq!(lines_dream[1], "01,123,normal,2");
-        assert_eq!(lines_dream[2], "02,45,foil,1");
+        assert_eq!(lines_dream[2], "P3,45,foil,1");
     }
 }
