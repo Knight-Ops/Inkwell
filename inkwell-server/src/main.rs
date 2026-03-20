@@ -7,8 +7,8 @@ use axum::{
 use image::io::Reader as ImageReader;
 use inkwell_core::{akaze_bytes_to_mat, Card, ScanResult};
 use opencv::{
-    core::{DMatch, Mat, Vector, NORM_HAMMING},
-    features2d::BFMatcher,
+    core::{DMatch, Mat, Vector},
+    features2d::FlannBasedMatcher,
     prelude::*,
 };
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
@@ -31,7 +31,7 @@ struct GlobalIndex {
     #[allow(dead_code)]
     train_vec: Vector<Mat>,
     cards: Vec<Card>,
-    matcher: Mutex<BFMatcher>,
+    matcher: Mutex<FlannBasedMatcher>,
 }
 
 async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
@@ -66,8 +66,18 @@ async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
     }
     println!("Indexed {} cards.", cards.len());
 
-    let mut matcher = BFMatcher::create(NORM_HAMMING, false).map_err(|e| {
-        sqlx::Error::Protocol(format!("Failed to create BFMatcher: {}", e))
+    // Use LSH index for binary descriptors (AKAZE)
+    // algorithm = 6 (FLANN_INDEX_LSH)
+    let index_params = opencv::flann::LshIndexParams::new(6, 12, 1).map_err(|e| {
+        sqlx::Error::Protocol(format!("Failed to create LshIndexParams: {}", e))
+    })?;
+
+    let search_params = opencv::flann::SearchParams::new_def().map_err(|e| {
+        sqlx::Error::Protocol(format!("Failed to create SearchParams: {}", e))
+    })?;
+
+    let mut matcher = FlannBasedMatcher::new(&index_params.into(), &search_params.into()).map_err(|e| {
+        sqlx::Error::Protocol(format!("Failed to create FlannBasedMatcher: {}", e))
     })?;
 
     matcher.add(&train_vec).map_err(|e| {
