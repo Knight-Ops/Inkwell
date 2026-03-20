@@ -7,14 +7,15 @@ use axum::{
 use image::io::Reader as ImageReader;
 use inkwell_core::{akaze_bytes_to_mat, Card, ScanResult};
 use opencv::{
-    core::{DMatch, Mat, Vector, NORM_HAMMING},
-    features2d::BFMatcher,
+    core::{DMatch, Mat, Vector},
+    features2d::FlannBasedMatcher,
     prelude::*,
 };
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::io::Cursor;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::net::TcpListener;
 
 mod ingest;
@@ -27,8 +28,10 @@ struct AppState {
 }
 
 struct GlobalIndex {
+    #[allow(dead_code)]
     train_vec: Vector<Mat>,
     cards: Vec<Card>,
+    matcher: Mutex<FlannBasedMatcher>,
 }
 
 async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
@@ -62,7 +65,34 @@ async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
         }
     }
     println!("Indexed {} cards.", cards.len());
-    Ok(GlobalIndex { train_vec, cards })
+
+    // Use LSH index for binary descriptors (AKAZE)
+    // algorithm = 6 (FLANN_INDEX_LSH)
+    let index_params = opencv::flann::LshIndexParams::new(6, 12, 1).map_err(|e| {
+        sqlx::Error::Protocol(format!("Failed to create LshIndexParams: {}", e))
+    })?;
+
+    let search_params = opencv::flann::SearchParams::new_def().map_err(|e| {
+        sqlx::Error::Protocol(format!("Failed to create SearchParams: {}", e))
+    })?;
+
+    let mut matcher = FlannBasedMatcher::new(&index_params.into(), &search_params.into()).map_err(|e| {
+        sqlx::Error::Protocol(format!("Failed to create FlannBasedMatcher: {}", e))
+    })?;
+
+    matcher.add(&train_vec).map_err(|e| {
+        sqlx::Error::Protocol(format!("Matcher add failed: {}", e))
+    })?;
+
+    matcher.train().map_err(|e| {
+        sqlx::Error::Protocol(format!("Matcher train failed: {}", e))
+    })?;
+
+    Ok(GlobalIndex {
+        train_vec,
+        cards,
+        matcher: Mutex::new(matcher),
+    })
 }
 
 #[tokio::main]
@@ -156,6 +186,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
     };
 
     let scan_result = tokio::task::spawn_blocking(move || {
+        let start_total = Instant::now();
         // Save image for debugging if configured (Synchronous I/O)
         if let Ok(dir) = std::env::var("CAPTURED_IMAGES_DIR") {
             let timestamp = std::time::SystemTime::now()
@@ -172,6 +203,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         }
 
         // Decode Image
+        let decode_start = Instant::now();
         let img_result = ImageReader::new(Cursor::new(&body))
             .with_guessed_format()
             .expect("Format guess failed") // TODO: Handle error better
@@ -188,8 +220,10 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 };
             }
         };
+        let decode_duration = decode_start.elapsed();
 
         // Compute AKAZE
+        let akaze_start = Instant::now();
         let (_kp, query_desc_bytes) = match inkwell_core::compute_akaze_features(&raw_img) {
             Ok(res) => res,
             Err(e) => {
@@ -201,6 +235,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 };
             }
         };
+        let akaze_duration = akaze_start.elapsed();
 
         if query_desc_bytes.is_empty() {
             println!("No features found in query image.");
@@ -224,36 +259,12 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         };
 
         // Match against index
-        // Use BFMatcher with NORM_HAMMING
-        let mut matcher = match BFMatcher::create(NORM_HAMMING, false) {
-            Ok(m) => m,
-            Err(e) => {
-                println!("Failed to create BFMatcher: {}", e);
-                return ScanResult {
-                    card: None,
-                    confidence: 0.0,
-                    global_total_scans: 0,
-                };
-            }
-        };
+        // Use pre-trained matcher from global_index
+        let matcher_init_duration = std::time::Duration::from_secs(0); // Already initialized
 
-        if let Err(e) = matcher.add(&global_index.train_vec) {
-            println!("Matcher add failed: {}", e);
-            return ScanResult {
-                card: None,
-                confidence: 0.0,
-                global_total_scans: 0,
-            };
-        }
-
-        if let Err(e) = matcher.train() {
-            println!("Matcher train failed: {}", e);
-            return ScanResult {
-                card: None,
-                confidence: 0.0,
-                global_total_scans: 0,
-            };
-        }
+        // Ensure query_mat is CV_32F for FLANN if it was SIFT/SURF,
+        // but for LSH (AKAZE/ORB) it should be CV_8U.
+        // AKAZE descriptors are CV_8U.
 
         let mut best_card: Option<Card> = None;
         let mut max_good_matches = 0;
@@ -264,11 +275,13 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         const MIN_GOOD_MATCHES: usize = 50;
         let ratio_thresh = 0.75;
 
+        let knn_start = Instant::now();
         let mut matches = Vector::<Vector<DMatch>>::new();
-        if matcher
-            .knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)
-            .is_err()
-        {
+        let knn_result = {
+            let mut matcher = global_index.matcher.lock().unwrap();
+            matcher.knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)
+        };
+        if knn_result.is_err() {
             println!("knn_match failed");
             return ScanResult {
                 card: None,
@@ -276,7 +289,9 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 global_total_scans: 0,
             };
         }
+        let knn_duration = knn_start.elapsed();
 
+        let voting_start = Instant::now();
         let mut votes = std::collections::HashMap::new();
 
         for m in matches {
@@ -296,6 +311,11 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 best_card = Some(global_index.cards[card_idx].clone());
             }
         }
+        let voting_duration = voting_start.elapsed();
+        let total_duration = start_total.elapsed();
+
+        println!("Timings: Decode: {:?}, AKAZE: {:?}, Matcher Init: {:?}, KNN: {:?}, Voting: {:?}, Total: {:?}",
+                 decode_duration, akaze_duration, matcher_init_duration, knn_duration, voting_duration, total_duration);
 
         if let Some(card) = best_card {
             if max_good_matches >= MIN_GOOD_MATCHES {
