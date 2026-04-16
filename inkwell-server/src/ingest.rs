@@ -3,7 +3,8 @@ use image::io::Reader as ImageReader;
 use img_hash::{HashAlg, HasherConfig};
 use reqwest::Client;
 use sqlx::{Pool, Sqlite};
-use std::{fs, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
+use tokio::fs;
 
 const LORCANA_JSON_URL: &str = "https://lorcanajson.org/files/current/en/allCards.json";
 const IMAGE_DIR: &str = "card_images";
@@ -36,7 +37,7 @@ pub async fn run_ingestion(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Starting ingestion job...");
 
-    fs::create_dir_all(&image_dir)?;
+    fs::create_dir_all(&image_dir).await?;
 
     println!("Fetching cards from {}", LORCANA_JSON_URL);
     let client = Client::new();
@@ -72,31 +73,39 @@ pub async fn run_ingestion(
                     .fetch_optional(&pool)
                     .await?;
 
-                    let needs_image_processing = !local_path.exists() || existing_card.is_none();
+                    let needs_image_processing = !fs::try_exists(&local_path).await.unwrap_or(false) || existing_card.is_none();
 
                     let subtitle = card_data.subtitle.clone().unwrap_or_default();
                     let rarity = card_data.rarity.clone().unwrap_or_else(|| "Unknown".to_string());
 
                     if needs_image_processing {
-                        if !local_path.exists() {
+                        let img_bytes = if !fs::try_exists(&local_path).await.unwrap_or(false) {
                             println!("Downloading image for {}...", id);
-                            let img_bytes = client.get(&card_data.images.full).send().await?.bytes().await?;
-                            fs::write(&local_path, img_bytes)?;
-                        }
-
-                        let img = ImageReader::open(&local_path)?.decode()?;
-                        let processed = inkwell_core::preprocess_image(&img);
-
-                        let phash_str = {
-                            let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).hash_size(12, 12).to_hasher();
-                            let hash = hasher.hash_image(&processed);
-                            hash.as_bytes()
-                                .iter()
-                                .map(|b| format!("{:02x}", b))
-                                .collect::<String>()
+                            let bytes = client.get(&card_data.images.full).send().await?.bytes().await?;
+                            fs::write(&local_path, &bytes).await?;
+                            bytes.to_vec()
+                        } else {
+                            fs::read(&local_path).await?
                         };
 
-                        let (_, akaze_bytes) = inkwell_core::compute_akaze_features(&img)?;
+                        let (phash_str, akaze_bytes) = tokio::task::spawn_blocking(move || {
+                            let img = ImageReader::new(std::io::Cursor::new(img_bytes))
+                                .with_guessed_format()?
+                                .decode()?;
+                            let processed = inkwell_core::preprocess_image(&img);
+
+                            let phash_str = {
+                                let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).hash_size(12, 12).to_hasher();
+                                let hash = hasher.hash_image(&processed);
+                                hash.as_bytes()
+                                    .iter()
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect::<String>()
+                            };
+
+                            let (_, akaze_bytes) = inkwell_core::compute_akaze_features(&img)?;
+                            Result::< (String, Vec<u8>), Box<dyn std::error::Error + Send + Sync>>::Ok((phash_str, akaze_bytes))
+                        }).await??;
 
                         sqlx::query(
                             r#"
