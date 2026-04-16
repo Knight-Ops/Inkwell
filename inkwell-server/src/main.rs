@@ -68,6 +68,14 @@ async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "inkwell_server=info".into()),
+        )
+        .init();
+
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:inkwell.db".to_string());
 
@@ -175,7 +183,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let img_reader = match ImageReader::new(Cursor::new(&body)).with_guessed_format() {
             Ok(reader) => reader,
             Err(e) => {
-                tracing::warn!("Failed to guess image format: {}", e);
+                tracing::error!("Failed to guess image format: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
@@ -188,7 +196,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let raw_img = match img_result {
             Ok(img) => img,
             Err(e) => {
-                tracing::warn!("Failed to decode image: {}", e);
+                tracing::error!("Failed to decode image: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
