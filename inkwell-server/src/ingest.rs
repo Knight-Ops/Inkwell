@@ -73,23 +73,24 @@ pub async fn run_ingestion(
                     .fetch_optional(&pool)
                     .await?;
 
-                    let needs_image_processing = !fs::try_exists(&local_path).await.unwrap_or(false) || existing_card.is_none();
+                    let file_exists = fs::try_exists(&local_path).await.unwrap_or(false);
+                    let needs_image_processing = !file_exists || existing_card.is_none();
 
                     let subtitle = card_data.subtitle.clone().unwrap_or_default();
                     let rarity = card_data.rarity.clone().unwrap_or_else(|| "Unknown".to_string());
 
                     if needs_image_processing {
-                        let img_bytes = if !fs::try_exists(&local_path).await.unwrap_or(false) {
+                        let img_bytes = if !file_exists {
                             println!("Downloading image for {}...", id);
                             let bytes = client.get(&card_data.images.full).send().await?.bytes().await?;
                             fs::write(&local_path, &bytes).await?;
-                            bytes.to_vec()
+                            bytes
                         } else {
-                            fs::read(&local_path).await?
+                            axum::body::Bytes::from(fs::read(&local_path).await?)
                         };
 
                         let (phash_str, akaze_bytes) = tokio::task::spawn_blocking(move || {
-                            let img = ImageReader::new(std::io::Cursor::new(img_bytes))
+                            let img = ImageReader::new(std::io::Cursor::new(&img_bytes))
                                 .with_guessed_format()?
                                 .decode()?;
                             let processed = inkwell_core::preprocess_image(&img);
