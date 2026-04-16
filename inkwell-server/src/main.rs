@@ -175,7 +175,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let img_reader = match ImageReader::new(Cursor::new(&body)).with_guessed_format() {
             Ok(reader) => reader,
             Err(e) => {
-                tracing::error!("Failed to guess image format: {}", e);
+                tracing::warn!("Failed to guess image format: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
@@ -188,7 +188,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let raw_img = match img_result {
             Ok(img) => img,
             Err(e) => {
-                tracing::error!("Failed to decode image: {}", e);
+                tracing::warn!("Failed to decode image: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
