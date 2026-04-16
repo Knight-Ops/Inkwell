@@ -73,7 +73,8 @@ pub async fn run_ingestion(
                     .fetch_optional(&pool)
                     .await?;
 
-                    let needs_image_processing = !fs::try_exists(&local_path).await.unwrap_or(false) || existing_card.is_none();
+                    let file_exists = fs::try_exists(&local_path).await?;
+                    let needs_image_processing = !file_exists || existing_card.is_none();
 
                     let subtitle = card_data.subtitle.clone().unwrap_or_default();
                     let rarity = card_data.rarity.clone().unwrap_or_else(|| "Unknown".to_string());
