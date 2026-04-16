@@ -296,20 +296,19 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let mut votes = std::collections::HashMap::new();
 
         for m in matches {
-            if m.len() == 2
-                && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance
-            {
-                let best_match = m.get(0).unwrap();
-                let img_idx = best_match.img_idx as usize;
-
-                *votes.entry(img_idx).or_insert(0) += 1;
+            let m = m.to_vec();
+            if let [m0, m1, ..] = m.as_slice() {
+                if m0.distance < ratio_thresh * m1.distance {
+                    let img_idx = m0.img_idx as usize;
+                    *votes.entry(img_idx).or_insert(0) += 1;
+                }
             }
         }
 
         for (card_idx, vote_count) in votes {
             if vote_count > max_good_matches {
                 max_good_matches = vote_count;
-                best_card = Some(global_index.cards[card_idx].clone());
+                best_card = global_index.cards.get(card_idx).cloned();
             }
         }
 
