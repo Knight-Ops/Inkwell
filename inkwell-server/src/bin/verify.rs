@@ -91,7 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process matches
     for m in matches {
-        if let (Ok(m0), Ok(m1)) = (m.get(0), m.get(1)) {
+        let m = m.to_vec();
+        if let [m0, m1, ..] = m.as_slice() {
             if m0.distance < ratio_thresh * m1.distance {
                 let img_idx = m0.img_idx as usize;
                 *votes.entry(img_idx).or_insert(0) += 1;
@@ -105,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (card_idx, vote_count) in votes {
         if vote_count > max_good_matches {
             max_good_matches = vote_count;
-            best_card = Some(cards[card_idx].clone());
+            best_card = cards.get(card_idx).cloned();
         }
     }
     println!("Matched in {:?}", start_match.elapsed());
