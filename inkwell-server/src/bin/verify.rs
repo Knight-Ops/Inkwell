@@ -91,11 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process matches
     for m in matches {
-        if m.len() == 2 && m.get(0).unwrap().distance < ratio_thresh * m.get(1).unwrap().distance {
-            let best_match = m.get(0).unwrap();
-            let img_idx = best_match.img_idx as usize;
-
-            *votes.entry(img_idx).or_insert(0) += 1;
+        if let (Ok(m0), Ok(m1)) = (m.get(0), m.get(1)) {
+            if m0.distance < ratio_thresh * m1.distance {
+                let img_idx = m0.img_idx as usize;
+                *votes.entry(img_idx).or_insert(0) += 1;
+            }
         }
     }
 
