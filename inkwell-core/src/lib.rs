@@ -86,9 +86,9 @@ pub fn preprocess_image(img: &image::DynamicImage) -> image::DynamicImage {
     // Convert to grayscale (luma8)
     let gray = resized.to_luma8();
     // Contrast stretch
-    image::imageops::contrast(&gray, 20.0);
+    let contrasted = image::imageops::contrast(&gray, 20.0);
     // Blur to reduce noise
-    let blurred = image::imageops::blur(&gray, 1.0);
+    let blurred = image::imageops::blur(&contrasted, 1.0);
     image::DynamicImage::ImageLuma8(blurred)
 }
 
@@ -164,5 +164,21 @@ mod tests {
         assert_eq!(deserialized.rarity, "Legendary");
         assert_eq!(deserialized.set_code, "1");
         assert_eq!(deserialized.card_number, 1);
+    }
+
+    #[test]
+    fn test_preprocess_image() {
+        use image::DynamicImage;
+        // Create a 100x100 blank image
+        let img = DynamicImage::ImageRgba8(image::ImageBuffer::new(100, 100));
+
+        let processed = preprocess_image(&img);
+
+        // Check dimensions
+        assert_eq!(processed.width(), 500);
+        assert_eq!(processed.height(), 500);
+
+        // Check it's grayscale (Luma8)
+        assert!(matches!(processed, DynamicImage::ImageLuma8(_)));
     }
 }
