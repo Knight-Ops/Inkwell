@@ -68,6 +68,14 @@ async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "inkwell_server=info".into()),
+        )
+        .init();
+
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:inkwell.db".to_string());
 
@@ -148,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanResult> {
-    println!("Received identification request ({} bytes)", body.len());
+    tracing::info!("Received identification request ({} bytes)", body.len());
 
     let global_index = {
         let rl = state.index.read().await;
@@ -165,9 +173,9 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             let _ = std::fs::create_dir_all(&dir);
             let filename = format!("{}/img_{}.jpg", dir, timestamp);
             if let Err(e) = std::fs::write(&filename, &body) {
-                println!("Failed to save image: {}", e);
+                tracing::error!("Failed to save image: {}", e);
             } else {
-                println!("Saved image to {}", filename);
+                tracing::debug!("Saved image to {}", filename);
             }
         }
 
@@ -175,21 +183,20 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let img_reader = match ImageReader::new(Cursor::new(&body)).with_guessed_format() {
             Ok(reader) => reader,
             Err(e) => {
-                println!("Failed to guess image format: {}", e);
-                return Json(ScanResult {
+                tracing::error!("Failed to guess image format: {}", e);
+                return ScanResult {
                     card: None,
                     confidence: 0.0,
                     global_total_scans: 0,
-                });
+                };
             }
         };
-
         let img_result = img_reader.decode();
 
         let raw_img = match img_result {
             Ok(img) => img,
             Err(e) => {
-                println!("Failed to decode image: {}", e);
+                tracing::error!("Failed to decode image: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
@@ -202,7 +209,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let (_kp, query_desc_bytes) = match inkwell_core::compute_akaze_features(&raw_img) {
             Ok(res) => res,
             Err(e) => {
-                println!("AKAZE computation failed: {}", e);
+                tracing::error!("AKAZE computation failed: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
@@ -212,7 +219,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         };
 
         if query_desc_bytes.is_empty() {
-            println!("No features found in query image.");
+            tracing::warn!("No features found in query image.");
             return ScanResult {
                 card: None,
                 confidence: 0.0,
@@ -223,7 +230,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let query_mat = match akaze_bytes_to_mat(&query_desc_bytes) {
             Ok(m) => m,
             Err(e) => {
-                println!("Failed to create query Mat: {}", e);
+                tracing::error!("Failed to create query Mat: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
@@ -237,7 +244,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         let mut matcher = match BFMatcher::create(NORM_HAMMING, false) {
             Ok(m) => m,
             Err(e) => {
-                println!("Failed to create BFMatcher: {}", e);
+                tracing::error!("Failed to create BFMatcher: {}", e);
                 return ScanResult {
                     card: None,
                     confidence: 0.0,
@@ -247,7 +254,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         };
 
         if let Err(e) = matcher.add(&global_index.train_vec) {
-            println!("Matcher add failed: {}", e);
+            tracing::error!("Matcher add failed: {}", e);
             return ScanResult {
                 card: None,
                 confidence: 0.0,
@@ -256,7 +263,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         }
 
         if let Err(e) = matcher.train() {
-            println!("Matcher train failed: {}", e);
+            tracing::error!("Matcher train failed: {}", e);
             return ScanResult {
                 card: None,
                 confidence: 0.0,
@@ -278,7 +285,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             .knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)
             .is_err()
         {
-            println!("knn_match failed");
+            tracing::error!("knn_match failed");
             return ScanResult {
                 card: None,
                 confidence: 0.0,
@@ -309,7 +316,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             if max_good_matches >= MIN_GOOD_MATCHES {
                 // Primitive confidence: cap at 100 matches?
                 let confidence = (max_good_matches as f64 / 100.0).min(1.0);
-                println!(
+                tracing::info!(
                     "Match found: {} ({} good matches)",
                     card.name, max_good_matches
                 );
@@ -319,7 +326,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                     global_total_scans: 0,
                 }
             } else {
-                println!(
+                tracing::info!(
                     "Best match {} had only {} good matches. Below threshold.",
                     card.name, max_good_matches
                 );
@@ -330,7 +337,7 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 }
             }
         } else {
-            println!("No match found.");
+            tracing::info!("No match found.");
             ScanResult {
                 card: None,
                 confidence: 0.0,
