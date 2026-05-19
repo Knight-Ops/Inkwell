@@ -218,12 +218,12 @@ pub struct GlobalIndex {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let mut res = Vec::with_capacity(s.len() / 2);
     for i in (0..s.len()).step_by(2) {
-        let byte_str = s.get(i..i+2)?;
+        let byte_str = s.get(i..i + 2)?;
         let byte = u8::from_str_radix(byte_str, 16).ok()?;
         res.push(byte);
     }
@@ -231,7 +231,10 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| (x ^ y).count_ones()).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x ^ y).count_ones())
+        .sum()
 }
 
 /// Matches a query image's descriptors Mat against a GlobalIndex
@@ -301,18 +304,18 @@ pub fn match_card(
         // Print top 3 pHash candidates for diagnostic logging
         let print_k = 3.min(candidates.len());
         let mut debug_candidates = Vec::new();
-        for i in 0..print_k {
-            let idx = candidates[i].0;
-            let dist = candidates[i].1;
+        for &(idx, dist) in candidates.iter().take(print_k) {
             debug_candidates.push(format!("{} (dist={})", global_index.cards[idx].name, dist));
         }
-        println!("MATCH_DEBUG: Top pHash candidates: {}", debug_candidates.join(", "));
+        println!(
+            "MATCH_DEBUG: Top pHash candidates: {}",
+            debug_candidates.join(", ")
+        );
 
         // Keep top K closest cards
         let k = candidate_limit.min(candidates.len());
-        for i in 0..k {
-            let idx = candidates[i].0;
-            if let Some(mat) = global_index.train_vec.get(idx).ok() {
+        for &(idx, _) in candidates.iter().take(k) {
+            if let Ok(mat) = global_index.train_vec.get(idx) {
                 candidate_mats.push(mat);
                 candidate_cards.push(global_index.cards[idx].clone());
             }
@@ -345,11 +348,12 @@ pub fn match_card(
 
     for m in matches {
         let m = m.to_vec();
-        if let [m0, m1, ..] = m.as_slice() {
-            if m0.distance < (env_ratio_thresh as f32) * m1.distance {
+        match m.as_slice() {
+            [m0, m1, ..] if m0.distance < (env_ratio_thresh as f32) * m1.distance => {
                 let img_idx = m0.img_idx as usize;
                 *votes.entry(img_idx).or_insert(0) += 1;
             }
+            _ => {}
         }
     }
 
@@ -380,7 +384,10 @@ pub fn match_card(
             })
         }
     } else {
-        println!("MATCH_DEBUG: No candidates found with any votes (ratio_thresh: {:.2})", env_ratio_thresh);
+        println!(
+            "MATCH_DEBUG: No candidates found with any votes (ratio_thresh: {:.2})",
+            env_ratio_thresh
+        );
         Ok(ScanResult {
             card: None,
             confidence: 0.0,

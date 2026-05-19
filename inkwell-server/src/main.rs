@@ -217,11 +217,18 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
         }
 
         // Match against index
-        const MIN_GOOD_MATCHES: usize = 50;
-        let ratio_thresh = 0.75;
+        // Match against index
+        let min_good_matches = std::env::var("MIN_GOOD_MATCHES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(40);
+        let ratio_thresh = std::env::var("MATCH_RATIO_THRESH")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.75);
 
         let match_start = std::time::Instant::now();
-        let match_res = match_card(&query_mat, &query_phash_bytes, &global_index, ratio_thresh, MIN_GOOD_MATCHES);
+        let match_res = match_card(&query_mat, &query_phash_bytes, &global_index, ratio_thresh, min_good_matches);
         let match_elapsed = match_start.elapsed();
         let total_elapsed = start_total.elapsed();
 
@@ -229,8 +236,9 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             Ok(res) => {
                 if let Some(ref card) = res.card {
                     tracing::info!(
-                        "Match found: {} in {:?}. details: akaze={:?}, match={:?}",
+                        "Match found: {} (confidence: {:.2}) in {:?}. details: akaze={:?}, match={:?}",
                         card.name,
+                        res.confidence,
                         total_elapsed,
                         akaze_elapsed,
                         match_elapsed
