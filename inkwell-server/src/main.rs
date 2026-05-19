@@ -202,12 +202,26 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             }
         };
 
+        // Compute perceptual hash (pHash) on the server to filter candidates
+        let mut query_phash_bytes = Vec::new();
+        if let Ok(img) = image::load_from_memory(&body) {
+            let processed = inkwell_core::preprocess_image(&img);
+            let hasher = img_hash::HasherConfig::new()
+                .hash_alg(img_hash::HashAlg::Gradient)
+                .hash_size(12, 12)
+                .to_hasher();
+            let hash = hasher.hash_image(&processed);
+            query_phash_bytes = hash.as_bytes().to_vec();
+        } else {
+            tracing::warn!("Failed to load image from memory for pHash calculation");
+        }
+
         // Match against index
         const MIN_GOOD_MATCHES: usize = 50;
         let ratio_thresh = 0.75;
 
         let match_start = std::time::Instant::now();
-        let match_res = match_card(&query_mat, &global_index, ratio_thresh, MIN_GOOD_MATCHES);
+        let match_res = match_card(&query_mat, &query_phash_bytes, &global_index, ratio_thresh, MIN_GOOD_MATCHES);
         let match_elapsed = match_start.elapsed();
         let total_elapsed = start_total.elapsed();
 

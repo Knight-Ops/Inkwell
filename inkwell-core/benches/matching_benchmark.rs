@@ -52,6 +52,7 @@ fn bench_card_matching(c: &mut Criterion) {
         b.iter(|| {
             let res = match_card(
                 black_box(&query_mat),
+                black_box(&[]),
                 black_box(&index_10),
                 black_box(0.75),
                 black_box(5),
@@ -64,6 +65,7 @@ fn bench_card_matching(c: &mut Criterion) {
         b.iter(|| {
             let res = match_card(
                 black_box(&query_mat),
+                black_box(&[]),
                 black_box(&index_100),
                 black_box(0.75),
                 black_box(5),
@@ -76,6 +78,7 @@ fn bench_card_matching(c: &mut Criterion) {
         b.iter(|| {
             let res = match_card(
                 black_box(&query_mat),
+                black_box(&[]),
                 black_box(&index_1000),
                 black_box(0.75),
                 black_box(5),

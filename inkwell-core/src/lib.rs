@@ -217,10 +217,28 @@ pub struct GlobalIndex {
     pub cards: Vec<Card>,
 }
 
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut res = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte_str = s.get(i..i+2)?;
+        let byte = u8::from_str_radix(byte_str, 16).ok()?;
+        res.push(byte);
+    }
+    Some(res)
+}
+
+fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| (x ^ y).count_ones()).sum()
+}
+
 /// Matches a query image's descriptors Mat against a GlobalIndex
 #[cfg(not(target_arch = "wasm32"))]
 pub fn match_card(
     query_mat: &Mat,
+    query_phash_bytes: &[u8],
     global_index: &GlobalIndex,
     ratio_thresh: f64,
     min_good_matches: usize,
@@ -246,9 +264,76 @@ pub fn match_card(
         });
     }
 
-    // Use BFMatcher with NORM_HAMMING
+    // 1. Read tuning knobs from environment variables (overriding passed parameters if set)
+    let env_ratio_thresh = std::env::var("MATCH_RATIO_THRESH")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(ratio_thresh);
+
+    let env_min_good_matches = std::env::var("MIN_GOOD_MATCHES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(min_good_matches);
+
+    let candidate_limit = std::env::var("MATCH_CANDIDATE_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(80); // Default to 80 for double robustness
+
+    // 2. Select candidates using pHash if query_phash_bytes is provided
+    let mut candidate_mats = Vector::<Mat>::new();
+    let mut candidate_cards = Vec::new();
+
+    if !query_phash_bytes.is_empty() {
+        let mut candidates: Vec<(usize, u32)> = Vec::with_capacity(global_index.cards.len());
+        for (idx, card) in global_index.cards.iter().enumerate() {
+            if let Some(card_bytes) = hex_decode(&card.phash) {
+                let dist = hamming_distance(query_phash_bytes, &card_bytes);
+                candidates.push((idx, dist));
+            } else {
+                candidates.push((idx, 9999));
+            }
+        }
+
+        // Sort by Hamming distance ascending
+        candidates.sort_by_key(|&(_, dist)| dist);
+
+        // Print top 3 pHash candidates for diagnostic logging
+        let print_k = 3.min(candidates.len());
+        let mut debug_candidates = Vec::new();
+        for i in 0..print_k {
+            let idx = candidates[i].0;
+            let dist = candidates[i].1;
+            debug_candidates.push(format!("{} (dist={})", global_index.cards[idx].name, dist));
+        }
+        println!("MATCH_DEBUG: Top pHash candidates: {}", debug_candidates.join(", "));
+
+        // Keep top K closest cards
+        let k = candidate_limit.min(candidates.len());
+        for i in 0..k {
+            let idx = candidates[i].0;
+            if let Some(mat) = global_index.train_vec.get(idx).ok() {
+                candidate_mats.push(mat);
+                candidate_cards.push(global_index.cards[idx].clone());
+            }
+        }
+    } else {
+        // Bypass pHash filtering (e.g. in tests/benchmarks)
+        candidate_mats = global_index.train_vec.clone();
+        candidate_cards = global_index.cards.clone();
+    }
+
+    if candidate_mats.is_empty() {
+        return Ok(ScanResult {
+            card: None,
+            confidence: 0.0,
+            global_total_scans: 0,
+        });
+    }
+
+    // 3. BFMatcher KNN search only against the candidates
     let mut matcher = BFMatcher::create(NORM_HAMMING, false)?;
-    matcher.add(&global_index.train_vec)?;
+    matcher.add(&candidate_mats)?;
     matcher.train()?;
 
     let mut matches = Vector::<Vector<DMatch>>::new();
@@ -261,7 +346,7 @@ pub fn match_card(
     for m in matches {
         let m = m.to_vec();
         if let [m0, m1, ..] = m.as_slice() {
-            if m0.distance < (ratio_thresh as f32) * m1.distance {
+            if m0.distance < (env_ratio_thresh as f32) * m1.distance {
                 let img_idx = m0.img_idx as usize;
                 *votes.entry(img_idx).or_insert(0) += 1;
             }
@@ -271,12 +356,12 @@ pub fn match_card(
     for (card_idx, vote_count) in votes {
         if vote_count > max_good_matches {
             max_good_matches = vote_count;
-            best_card = global_index.cards.get(card_idx).cloned();
+            best_card = candidate_cards.get(card_idx).cloned();
         }
     }
 
     if let Some(card) = best_card {
-        if max_good_matches >= min_good_matches {
+        if max_good_matches >= env_min_good_matches {
             let confidence = (max_good_matches as f64 / 100.0).min(1.0);
             Ok(ScanResult {
                 card: Some(card),
@@ -284,6 +369,10 @@ pub fn match_card(
                 global_total_scans: 0,
             })
         } else {
+            println!(
+                "MATCH_DEBUG: Best candidate '{}' had {} matches, but required {} (ratio_thresh: {:.2})",
+                card.name, max_good_matches, env_min_good_matches, env_ratio_thresh
+            );
             Ok(ScanResult {
                 card: None,
                 confidence: 0.0,
@@ -291,6 +380,7 @@ pub fn match_card(
             })
         }
     } else {
+        println!("MATCH_DEBUG: No candidates found with any votes (ratio_thresh: {:.2})", env_ratio_thresh);
         Ok(ScanResult {
             card: None,
             confidence: 0.0,
@@ -455,7 +545,7 @@ mod tests {
         let q = q_temp.reshape(1, 1).unwrap();
         q.copy_to(&mut query).unwrap();
 
-        let res = match_card(&query, &index, 0.75, 1).unwrap();
+        let res = match_card(&query, &[], &index, 0.75, 1).unwrap();
         assert!(res.card.is_some());
         assert_eq!(res.card.unwrap().id, "c1");
     }
