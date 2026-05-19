@@ -319,14 +319,18 @@ pub fn App() -> impl IntoView {
             let sx = (width - box_width) / 2.0;
             let sy = (height - box_height) / 2.0;
 
-            // Create a temp canvas for the cropped image
+            // Target dimensions (downscaled)
+            let target_height = 500.0;
+            let target_width = target_height * (63.0 / 88.0); // ~358px
+
+            // Create a temp canvas for the cropped & downscaled image
             let document = web_sys::window().unwrap().document().unwrap();
             let crop_canvas = document
                 .create_element("canvas")
                 .unwrap()
                 .unchecked_into::<web_sys::HtmlCanvasElement>();
-            crop_canvas.set_width(box_width as u32);
-            crop_canvas.set_height(box_height as u32);
+            crop_canvas.set_width(target_width as u32);
+            crop_canvas.set_height(target_height as u32);
 
             let ctx = crop_canvas
                 .get_context("2d")
@@ -334,15 +338,23 @@ pub fn App() -> impl IntoView {
                 .unwrap()
                 .unchecked_into::<web_sys::CanvasRenderingContext2d>();
 
-            // Draw the middle part of the main canvas onto the crop canvas
+            // Draw and scale guide box to target canvas size (GPU-bound)
             let _ = ctx
                 .draw_image_with_html_canvas_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
-                    &canvas, sx, sy, box_width, box_height, 0.0, 0.0, box_width, box_height,
+                    &canvas,
+                    sx,
+                    sy,
+                    box_width,
+                    box_height,
+                    0.0,
+                    0.0,
+                    target_width,
+                    target_height,
                 );
 
-            // Convert crop_canvas to blob/bytes
-            let data_url = crop_canvas.to_data_url().unwrap();
-            let base64_str = data_url.strip_prefix("data:image/png;base64,").unwrap();
+            // Convert crop_canvas to a compressed JPEG (typically ~25KB)
+            let data_url = crop_canvas.to_data_url_with_type("image/jpeg").unwrap();
+            let base64_str = data_url.strip_prefix("data:image/jpeg;base64,").unwrap();
 
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(base64_str)
@@ -350,6 +362,8 @@ pub fn App() -> impl IntoView {
 
             spawn_local(async move {
                 log_msg(format!("Scanned bytes: {}", bytes.len()));
+
+                let start_time = js_sys::Date::now();
 
                 // Call API (on port 4000) with raw bytes
                 match Request::post("/api/identify")
@@ -359,6 +373,9 @@ pub fn App() -> impl IntoView {
                     .await
                 {
                     Ok(resp) => {
+                        let elapsed = js_sys::Date::now() - start_time;
+                        log_msg(format!("Scan round-trip latency: {:.0}ms", elapsed));
+
                         let result = resp.json::<ScanResult>().await.unwrap();
                         if let Some(card) = result.card.clone() {
                             set_scan_status.set(Some(true));

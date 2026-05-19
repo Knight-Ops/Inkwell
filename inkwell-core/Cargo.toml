@@ -13,3 +13,10 @@ image = { version = "0.23", default-features = false, features = [
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 opencv = "0.98.1"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "matching_benchmark"
+harness = false
