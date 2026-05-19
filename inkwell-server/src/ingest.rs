@@ -177,3 +177,30 @@ pub async fn run_ingestion(
     println!("Ingestion complete.");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn test_run_ingestion_gated() {
+        if std::env::var("INKWELL_LOCAL_TESTS").is_err() {
+            println!("Skipping heavy network ingest test in CI environment (INKWELL_LOCAL_TESTS not set).");
+            return;
+        }
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+
+        let temp_dir = std::env::temp_dir().join("inkwell_ingest_test");
+        let temp_dir_str = temp_dir.to_string_lossy().to_string();
+
+        let res = run_ingestion(pool, temp_dir_str).await;
+        assert!(res.is_ok(), "Ingestion should succeed locally");
+    }
+}

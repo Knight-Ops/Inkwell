@@ -4,3 +4,4 @@
 /deploy/captured_images
 Docker.env
 card_images/
+.cargo

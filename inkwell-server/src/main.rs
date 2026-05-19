@@ -4,15 +4,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use image::io::Reader as ImageReader;
-use inkwell_core::{akaze_bytes_to_mat, Card, ScanResult};
-use opencv::{
-    core::{DMatch, Mat, Vector, NORM_HAMMING},
-    features2d::BFMatcher,
-    prelude::*,
-};
+use inkwell_core::{akaze_bytes_to_mat, match_card, Card, GlobalIndex, ScanResult};
+use opencv::core::{Mat, Vector};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
-use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -24,11 +18,6 @@ struct AppState {
     #[allow(dead_code)]
     pool: Pool<Sqlite>,
     index: Arc<tokio::sync::RwLock<Arc<GlobalIndex>>>,
-}
-
-struct GlobalIndex {
-    train_vec: Vector<Mat>,
-    cards: Vec<Card>,
 }
 
 async fn load_index(pool: &Pool<Sqlite>) -> Result<GlobalIndex, sqlx::Error> {
@@ -164,6 +153,8 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
     };
 
     let scan_result = tokio::task::spawn_blocking(move || {
+        let start_total = std::time::Instant::now();
+
         // Save image for debugging if configured (Synchronous I/O)
         if let Ok(dir) = std::env::var("CAPTURED_IMAGES_DIR") {
             let timestamp = std::time::SystemTime::now()
@@ -172,41 +163,11 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 .as_millis();
             let _ = std::fs::create_dir_all(&dir);
             let filename = format!("{}/img_{}.jpg", dir, timestamp);
-            if let Err(e) = std::fs::write(&filename, &body) {
-                tracing::error!("Failed to save image: {}", e);
-            } else {
-                tracing::debug!("Saved image to {}", filename);
-            }
+            let _ = std::fs::write(&filename, &body);
         }
 
-        // Decode Image
-        let img_reader = match ImageReader::new(Cursor::new(&body)).with_guessed_format() {
-            Ok(reader) => reader,
-            Err(e) => {
-                tracing::error!("Failed to guess image format: {}", e);
-                return ScanResult {
-                    card: None,
-                    confidence: 0.0,
-                    global_total_scans: 0,
-                };
-            }
-        };
-        let img_result = img_reader.decode();
-
-        let raw_img = match img_result {
-            Ok(img) => img,
-            Err(e) => {
-                tracing::error!("Failed to decode image: {}", e);
-                return ScanResult {
-                    card: None,
-                    confidence: 0.0,
-                    global_total_scans: 0,
-                };
-            }
-        };
-
-        // Compute AKAZE
-        let (_kp, query_desc_bytes) = match inkwell_core::compute_akaze_features(&raw_img) {
+        // Compute AKAZE natively from raw image bytes (bypasses pure-Rust codecs entirely)
+        let (_kp, query_desc_bytes) = match inkwell_core::compute_akaze_features_from_bytes(&body) {
             Ok(res) => res,
             Err(e) => {
                 tracing::error!("AKAZE computation failed: {}", e);
@@ -217,6 +178,8 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
                 };
             }
         };
+
+        let akaze_elapsed = start_total.elapsed();
 
         if query_desc_bytes.is_empty() {
             tracing::warn!("No features found in query image.");
@@ -239,109 +202,64 @@ async fn identify_card(State(state): State<AppState>, body: Bytes) -> Json<ScanR
             }
         };
 
-        // Match against index
-        // Use BFMatcher with NORM_HAMMING
-        let mut matcher = match BFMatcher::create(NORM_HAMMING, false) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to create BFMatcher: {}", e);
-                return ScanResult {
-                    card: None,
-                    confidence: 0.0,
-                    global_total_scans: 0,
-                };
-            }
-        };
-
-        if let Err(e) = matcher.add(&global_index.train_vec) {
-            tracing::error!("Matcher add failed: {}", e);
-            return ScanResult {
-                card: None,
-                confidence: 0.0,
-                global_total_scans: 0,
-            };
-        }
-
-        if let Err(e) = matcher.train() {
-            tracing::error!("Matcher train failed: {}", e);
-            return ScanResult {
-                card: None,
-                confidence: 0.0,
-                global_total_scans: 0,
-            };
-        }
-
-        let mut best_card: Option<Card> = None;
-        let mut max_good_matches = 0;
-
-        // Low Match Count threshold (depends on feature count).
-        // AKAZE typically extracts 100-1000 features.
-        // Let's set a minimum threshold.
-        const MIN_GOOD_MATCHES: usize = 50;
-        let ratio_thresh = 0.75;
-
-        let mut matches = Vector::<Vector<DMatch>>::new();
-        if matcher
-            .knn_match(&query_mat, &mut matches, 2, &Mat::default(), false)
-            .is_err()
-        {
-            tracing::error!("knn_match failed");
-            return ScanResult {
-                card: None,
-                confidence: 0.0,
-                global_total_scans: 0,
-            };
-        }
-
-        let mut votes = std::collections::HashMap::new();
-
-        for m in matches {
-            let m = m.to_vec();
-            if let [m0, m1, ..] = m.as_slice() {
-                if m0.distance < ratio_thresh * m1.distance {
-                    let img_idx = m0.img_idx as usize;
-                    *votes.entry(img_idx).or_insert(0) += 1;
-                }
-            }
-        }
-
-        for (card_idx, vote_count) in votes {
-            if vote_count > max_good_matches {
-                max_good_matches = vote_count;
-                best_card = global_index.cards.get(card_idx).cloned();
-            }
-        }
-
-        if let Some(card) = best_card {
-            if max_good_matches >= MIN_GOOD_MATCHES {
-                // Primitive confidence: cap at 100 matches?
-                let confidence = (max_good_matches as f64 / 100.0).min(1.0);
-                tracing::info!(
-                    "Match found: {} ({} good matches)",
-                    card.name, max_good_matches
-                );
-                ScanResult {
-                    card: Some(card),
-                    confidence,
-                    global_total_scans: 0,
-                }
-            } else {
-                tracing::info!(
-                    "Best match {} had only {} good matches. Below threshold.",
-                    card.name, max_good_matches
-                );
-                ScanResult {
-                    card: None,
-                    confidence: 0.0,
-                    global_total_scans: 0,
-                }
-            }
+        // Compute perceptual hash (pHash) on the server to filter candidates
+        let mut query_phash_bytes = Vec::new();
+        if let Ok(img) = image::load_from_memory(&body) {
+            let processed = inkwell_core::preprocess_image(&img);
+            let hasher = img_hash::HasherConfig::new()
+                .hash_alg(img_hash::HashAlg::Gradient)
+                .hash_size(12, 12)
+                .to_hasher();
+            let hash = hasher.hash_image(&processed);
+            query_phash_bytes = hash.as_bytes().to_vec();
         } else {
-            tracing::info!("No match found.");
-            ScanResult {
-                card: None,
-                confidence: 0.0,
-                global_total_scans: 0,
+            tracing::warn!("Failed to load image from memory for pHash calculation");
+        }
+
+        // Match against index
+        // Match against index
+        let min_good_matches = std::env::var("MIN_GOOD_MATCHES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(40);
+        let ratio_thresh = std::env::var("MATCH_RATIO_THRESH")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.75);
+
+        let match_start = std::time::Instant::now();
+        let match_res = match_card(&query_mat, &query_phash_bytes, &global_index, ratio_thresh, min_good_matches);
+        let match_elapsed = match_start.elapsed();
+        let total_elapsed = start_total.elapsed();
+
+        match match_res {
+            Ok(res) => {
+                if let Some(ref card) = res.card {
+                    tracing::info!(
+                        "Match found: {} (confidence: {:.2}) in {:?}. details: akaze={:?}, match={:?}",
+                        card.name,
+                        res.confidence,
+                        total_elapsed,
+                        akaze_elapsed,
+                        match_elapsed
+                    );
+                } else {
+                    tracing::info!(
+                        "No match found in {:?}. details: akaze={:?}, match={:?}",
+                        total_elapsed,
+                        akaze_elapsed,
+                        match_elapsed
+                    );
+                }
+                res
+            }
+            Err(e) => {
+                tracing::error!("Card matching failed: {}", e);
+                ScanResult {
+                    card: None,
+                    confidence: 0.0,
+                    global_total_scans: 0,
+                }
             }
         }
     })
@@ -389,4 +307,87 @@ async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "total_scanned_cards": total
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn test_in_memory_db_and_index() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+
+        sqlx::query(
+            r#"
+            INSERT INTO cards (id, name, subtitle, set_code, image_url, phash, rarity, card_number, akaze_data)
+            VALUES ('mock_id', 'Mock Name', 'Mock Subtitle', '1', 'url', 'phash', 'Common', 1, ?)
+            "#,
+        )
+        .bind(vec![0u8; 10 * 61])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let index = load_index(&pool).await.unwrap();
+        assert_eq!(index.cards.len(), 1);
+        assert_eq!(index.cards[0].id, "mock_id");
+        assert_eq!(index.cards[0].name, "Mock Name");
+        assert_eq!(index.cards[0].subtitle, "Mock Subtitle");
+        assert_eq!(index.cards[0].rarity, "Common");
+        assert_eq!(index.cards[0].card_number, 1);
+        assert_eq!(index.train_vec.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_handler() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+
+        let index = load_index(&pool).await.unwrap();
+        let state = AppState {
+            pool: pool.clone(),
+            index: Arc::new(tokio::sync::RwLock::new(Arc::new(index))),
+        };
+
+        let response = get_stats(State(state)).await;
+        let json = response.0;
+        assert_eq!(json["total_scanned_cards"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_identify_card_handler_no_match() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+
+        let index = load_index(&pool).await.unwrap();
+        let state = AppState {
+            pool: pool.clone(),
+            index: Arc::new(tokio::sync::RwLock::new(Arc::new(index))),
+        };
+
+        let mut img_bytes = Vec::new();
+        let img = image::DynamicImage::ImageLuma8(image::GrayImage::new(10, 10));
+        let mut cursor = std::io::Cursor::new(&mut img_bytes);
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+
+        let response = identify_card(State(state), axum::body::Bytes::from(img_bytes)).await;
+        let result = response.0;
+        assert!(result.card.is_none());
+        assert_eq!(result.confidence, 0.0);
+    }
 }

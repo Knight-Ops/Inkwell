@@ -50,6 +50,75 @@ pub fn compute_akaze_features(
     Ok((keypoints_vec, descriptors_bytes))
 }
 
+/// Computes AKAZE features for raw image bytes (natively decoded and resized).
+/// Returns a tuple of (KeyPoints, Descriptors serialized as Vec<u8>).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn compute_akaze_features_from_bytes(
+    img_bytes: &[u8],
+) -> Result<(Vec<KeyPoint>, Vec<u8>), opencv::Error> {
+    use opencv::{
+        core::{Size, Vector},
+        imgcodecs, imgproc,
+    };
+
+    if img_bytes.is_empty() {
+        return Err(opencv::Error::new(
+            opencv::core::StsBadArg,
+            "Empty image bytes".to_string(),
+        ));
+    }
+
+    // 1. Construct Vector<u8> from bytes
+    let buf = Vector::<u8>::from_slice(img_bytes);
+
+    // 2. Decode bytes natively to grayscale Mat
+    let gray_mat = imgcodecs::imdecode(&buf, imgcodecs::IMREAD_GRAYSCALE)?;
+    if gray_mat.empty() {
+        return Err(opencv::Error::new(
+            opencv::core::StsError,
+            "Failed to decode image bytes".to_string(),
+        ));
+    }
+
+    // 3. Resize Mat natively, preserving aspect ratio (to fit inside 500x500 box, matching original image::resize)
+    let src_w = gray_mat.cols() as f64;
+    let src_h = gray_mat.rows() as f64;
+    let scale = (500.0 / src_w).min(500.0 / src_h);
+    let target_w = (src_w * scale) as i32;
+    let target_h = (src_h * scale) as i32;
+
+    let mut resized_mat = Mat::default();
+    imgproc::resize(
+        &gray_mat,
+        &mut resized_mat,
+        Size::new(target_w, target_h),
+        0.0,
+        0.0,
+        imgproc::INTER_LINEAR,
+    )?;
+
+    // 4. Init AKAZE
+    let mut akaze = AKAZE::create_def()?;
+
+    // 5. Detect and Compute
+    let mut keypoints = Vector::<KeyPoint>::new();
+    let mut descriptors = Mat::default();
+    let mask = Mat::default();
+
+    akaze.detect_and_compute(&resized_mat, &mask, &mut keypoints, &mut descriptors, false)?;
+
+    // 6. Convert descriptors Mat to Vec<u8> for storage
+    let data_len = descriptors.total() * descriptors.elem_size()?;
+    let mut descriptors_bytes = vec![0u8; data_len];
+    let data_ptr = descriptors.data_bytes()?;
+    descriptors_bytes.copy_from_slice(data_ptr);
+
+    // 7. Convert Vector<KeyPoint> to Vec<KeyPoint>
+    let keypoints_vec: Vec<KeyPoint> = keypoints.to_vec();
+
+    Ok((keypoints_vec, descriptors_bytes))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub const AKAZE_DESC_SIZE: i32 = 61;
 
@@ -140,6 +209,193 @@ pub struct ScanResult {
     pub global_total_scans: u64,
 }
 
+/// Global Index structure for hot-RAM lookup of cards
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct GlobalIndex {
+    pub train_vec: Vector<Mat>,
+    pub cards: Vec<Card>,
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut res = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte_str = s.get(i..i + 2)?;
+        let byte = u8::from_str_radix(byte_str, 16).ok()?;
+        res.push(byte);
+    }
+    Some(res)
+}
+
+fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x ^ y).count_ones())
+        .sum()
+}
+
+/// Matches a query image's descriptors Mat against a GlobalIndex
+#[cfg(not(target_arch = "wasm32"))]
+pub fn match_card(
+    query_mat: &Mat,
+    query_phash_bytes: &[u8],
+    global_index: &GlobalIndex,
+    ratio_thresh: f64,
+    min_good_matches: usize,
+) -> Result<ScanResult, opencv::Error> {
+    use opencv::{
+        core::{DMatch, NORM_HAMMING},
+        features2d::BFMatcher,
+    };
+
+    if query_mat.empty() {
+        return Ok(ScanResult {
+            card: None,
+            confidence: 0.0,
+            global_total_scans: 0,
+        });
+    }
+
+    if global_index.train_vec.is_empty() {
+        return Ok(ScanResult {
+            card: None,
+            confidence: 0.0,
+            global_total_scans: 0,
+        });
+    }
+
+    // 1. Read tuning knobs from environment variables (overriding passed parameters if set)
+    let env_ratio_thresh = std::env::var("MATCH_RATIO_THRESH")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(ratio_thresh);
+
+    let env_min_good_matches = std::env::var("MIN_GOOD_MATCHES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(min_good_matches);
+
+    let candidate_limit = std::env::var("MATCH_CANDIDATE_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(80); // Default to 80 for double robustness
+
+    // 2. Select candidates using pHash if query_phash_bytes is provided
+    let mut candidate_mats = Vector::<Mat>::new();
+    let mut candidate_cards = Vec::new();
+
+    if !query_phash_bytes.is_empty() {
+        let mut candidates: Vec<(usize, u32)> = Vec::with_capacity(global_index.cards.len());
+        for (idx, card) in global_index.cards.iter().enumerate() {
+            if let Some(card_bytes) = hex_decode(&card.phash) {
+                let dist = hamming_distance(query_phash_bytes, &card_bytes);
+                candidates.push((idx, dist));
+            } else {
+                candidates.push((idx, 9999));
+            }
+        }
+
+        // Sort by Hamming distance ascending
+        candidates.sort_by_key(|&(_, dist)| dist);
+
+        // Print top 3 pHash candidates for diagnostic logging
+        let print_k = 3.min(candidates.len());
+        let mut debug_candidates = Vec::new();
+        for &(idx, dist) in candidates.iter().take(print_k) {
+            debug_candidates.push(format!("{} (dist={})", global_index.cards[idx].name, dist));
+        }
+        println!(
+            "MATCH_DEBUG: Top pHash candidates: {}",
+            debug_candidates.join(", ")
+        );
+
+        // Keep top K closest cards
+        let k = candidate_limit.min(candidates.len());
+        for &(idx, _) in candidates.iter().take(k) {
+            if let Ok(mat) = global_index.train_vec.get(idx) {
+                candidate_mats.push(mat);
+                candidate_cards.push(global_index.cards[idx].clone());
+            }
+        }
+    } else {
+        // Bypass pHash filtering (e.g. in tests/benchmarks)
+        candidate_mats = global_index.train_vec.clone();
+        candidate_cards = global_index.cards.clone();
+    }
+
+    if candidate_mats.is_empty() {
+        return Ok(ScanResult {
+            card: None,
+            confidence: 0.0,
+            global_total_scans: 0,
+        });
+    }
+
+    // 3. BFMatcher KNN search only against the candidates
+    let mut matcher = BFMatcher::create(NORM_HAMMING, false)?;
+    matcher.add(&candidate_mats)?;
+    matcher.train()?;
+
+    let mut matches = Vector::<Vector<DMatch>>::new();
+    matcher.knn_match(query_mat, &mut matches, 2, &Mat::default(), false)?;
+
+    let mut best_card: Option<Card> = None;
+    let mut max_good_matches = 0;
+    let mut votes = std::collections::HashMap::new();
+
+    for m in matches {
+        let m = m.to_vec();
+        match m.as_slice() {
+            [m0, m1, ..] if m0.distance < (env_ratio_thresh as f32) * m1.distance => {
+                let img_idx = m0.img_idx as usize;
+                *votes.entry(img_idx).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+
+    for (card_idx, vote_count) in votes {
+        if vote_count > max_good_matches {
+            max_good_matches = vote_count;
+            best_card = candidate_cards.get(card_idx).cloned();
+        }
+    }
+
+    if let Some(card) = best_card {
+        if max_good_matches >= env_min_good_matches {
+            let confidence = (max_good_matches as f64 / 100.0).min(1.0);
+            Ok(ScanResult {
+                card: Some(card),
+                confidence,
+                global_total_scans: 0,
+            })
+        } else {
+            println!(
+                "MATCH_DEBUG: Best candidate '{}' had {} matches, but required {} (ratio_thresh: {:.2})",
+                card.name, max_good_matches, env_min_good_matches, env_ratio_thresh
+            );
+            Ok(ScanResult {
+                card: None,
+                confidence: 0.0,
+                global_total_scans: 0,
+            })
+        }
+    } else {
+        println!(
+            "MATCH_DEBUG: No candidates found with any votes (ratio_thresh: {:.2})",
+            env_ratio_thresh
+        );
+        Ok(ScanResult {
+            card: None,
+            confidence: 0.0,
+            global_total_scans: 0,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +420,140 @@ mod tests {
         assert_eq!(deserialized.rarity, "Legendary");
         assert_eq!(deserialized.set_code, "1");
         assert_eq!(deserialized.card_number, 1);
+    }
+
+    #[test]
+    fn test_preprocess_image() {
+        use image::{DynamicImage, GenericImageView, GrayImage};
+        let img = DynamicImage::ImageLuma8(GrayImage::new(100, 100));
+        let processed = preprocess_image(&img);
+        assert_eq!(processed.width(), 500);
+        assert_eq!(processed.height(), 500);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_akaze_features_and_reconstruction() {
+        use image::{DynamicImage, GrayImage};
+        let mut img_raw = GrayImage::new(500, 500);
+        for x in 0..500 {
+            for y in 0..500 {
+                if ((x / 50) + (y / 50)) % 2 == 0 {
+                    img_raw.put_pixel(x, y, image::Luma([255]));
+                } else {
+                    img_raw.put_pixel(x, y, image::Luma([0]));
+                }
+            }
+        }
+        let img = DynamicImage::ImageLuma8(img_raw);
+        let (kp, desc_bytes) = compute_akaze_features(&img).unwrap();
+        assert!(!kp.is_empty(), "Keypoints should be detected");
+        assert!(
+            !desc_bytes.is_empty(),
+            "Descriptor bytes should not be empty"
+        );
+
+        let reconstructed = akaze_bytes_to_mat(&desc_bytes).unwrap();
+        assert_eq!(reconstructed.rows(), kp.len() as i32);
+        assert_eq!(reconstructed.cols(), AKAZE_DESC_SIZE);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_compute_akaze_features_from_bytes() {
+        use image::{DynamicImage, GrayImage};
+        let mut img_raw = GrayImage::new(500, 500);
+        for x in 0..500 {
+            for y in 0..500 {
+                if ((x / 50) + (y / 50)) % 2 == 0 {
+                    img_raw.put_pixel(x, y, image::Luma([255]));
+                } else {
+                    img_raw.put_pixel(x, y, image::Luma([0]));
+                }
+            }
+        }
+        let img = DynamicImage::ImageLuma8(img_raw);
+        let mut jpeg_bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut jpeg_bytes),
+            image::ImageOutputFormat::Jpeg(85),
+        )
+        .unwrap();
+
+        let (kp, desc_bytes) = compute_akaze_features_from_bytes(&jpeg_bytes).unwrap();
+        assert!(
+            !kp.is_empty(),
+            "Keypoints should be detected from JPEG bytes"
+        );
+        assert!(
+            !desc_bytes.is_empty(),
+            "Descriptor bytes should not be empty"
+        );
+
+        let reconstructed = akaze_bytes_to_mat(&desc_bytes).unwrap();
+        assert_eq!(reconstructed.rows(), kp.len() as i32);
+        assert_eq!(reconstructed.cols(), AKAZE_DESC_SIZE);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_match_card() {
+        let mut train_vec = Vector::<Mat>::new();
+
+        let mut d1_bytes = vec![0u8; 2 * 61];
+        d1_bytes[61] = 1; // second descriptor has first byte = 1
+        let d1_temp = Mat::from_slice(&d1_bytes).unwrap();
+        let d1 = d1_temp.reshape(1, 2).unwrap();
+        let mut d1_owned = Mat::default();
+        d1.copy_to(&mut d1_owned).unwrap();
+        train_vec.push(d1_owned);
+
+        let mut d2_bytes = vec![255u8; 2 * 61];
+        d2_bytes[61] = 254; // second descriptor has first byte = 254
+        let d2_temp = Mat::from_slice(&d2_bytes).unwrap();
+        let d2 = d2_temp.reshape(1, 2).unwrap();
+        let mut d2_owned = Mat::default();
+        d2.copy_to(&mut d2_owned).unwrap();
+        train_vec.push(d2_owned);
+
+        let cards = vec![
+            Card {
+                id: "c1".to_string(),
+                name: "Card 1".to_string(),
+                subtitle: "".to_string(),
+                phash: "".to_string(),
+                akaze_data: vec![],
+                image_url: "".to_string(),
+                rarity: "".to_string(),
+                promo_grouping: None,
+                set_code: "1".to_string(),
+                card_number: 1,
+            },
+            Card {
+                id: "c2".to_string(),
+                name: "Card 2".to_string(),
+                subtitle: "".to_string(),
+                phash: "".to_string(),
+                akaze_data: vec![],
+                image_url: "".to_string(),
+                rarity: "".to_string(),
+                promo_grouping: None,
+                set_code: "1".to_string(),
+                card_number: 2,
+            },
+        ];
+
+        let index = GlobalIndex { train_vec, cards };
+
+        let mut query = Mat::default();
+        // Query has 1 descriptor of all 0s
+        let q_bytes = vec![0u8; 1 * 61];
+        let q_temp = Mat::from_slice(&q_bytes).unwrap();
+        let q = q_temp.reshape(1, 1).unwrap();
+        q.copy_to(&mut query).unwrap();
+
+        let res = match_card(&query, &[], &index, 0.75, 1).unwrap();
+        assert!(res.card.is_some());
+        assert_eq!(res.card.unwrap().id, "c1");
     }
 }

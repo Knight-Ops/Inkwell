@@ -1,4 +1,3 @@
-use image::io::Reader as ImageReader;
 use inkwell_core::{akaze_bytes_to_mat, Card, ScanResult};
 use opencv::{
     core::{DMatch, Mat, Vector, NORM_HAMMING},
@@ -64,9 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hash Input Image
     println!("Computing AKAZE for {}...", image_path);
     let start_hash = std::time::Instant::now();
-    let raw_img = ImageReader::open(image_path)?.decode()?;
-
-    let (_kp, query_desc_bytes) = inkwell_core::compute_akaze_features(&raw_img)?;
+    let file_bytes = std::fs::read(image_path)?;
+    let (_kp, query_desc_bytes) = inkwell_core::compute_akaze_features_from_bytes(&file_bytes)?;
     if query_desc_bytes.is_empty() {
         println!("No features found in query image.");
         return Ok(());
